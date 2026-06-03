@@ -48,5 +48,9 @@ qsub batch_import.sh
 ## Inspection on QIIME2 viewer, https://view.qiime2.org/
 qsub stageout.sh
 
-## Denoising
+## Primer trimming
+qsub batch_trim_primers.sh
+
+## Inspection on QIIME2 viewer, https://view.qiime2.org/
+qsub stageout.sh
 
