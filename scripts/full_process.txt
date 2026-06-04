@@ -48,11 +48,23 @@ qsub batch_import.sh
 ## Inspection on QIIME2 viewer, https://view.qiime2.org/
 qsub stageout.sh
 
-## Primer trimming
+## Primer trimming v4
 qsub batch_trim_primers.sh
 
 ## Inspection on QIIME2 viewer, https://view.qiime2.org/
 qsub stageout.sh
 
-## Denoising
+## Denoising v4
 qsub batch_denoise.sh
+
+## Merging data v4
+# Feature tables
+qiime feature-table merge \
+  --i-tables *_asv_table.qza \
+  --o-merged-table merged_asv_table.qza
+
+# Representative sequences
+qiime feature-table merge-seqs \
+  --i-data *_asv.qza \
+  --o-merged-data merged_asv.qza
+
