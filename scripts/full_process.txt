@@ -35,6 +35,8 @@ conda env create \
 
 conda activate rachis-qiime2-2026.4
 
+## Unless stated otherwise, all processing scripts were submitted on Eddie
+
 ## Getting data ready for QIIME2
 ## Sample manifest file, https://amplicon-docs.qiime2.org/en/2026.4/how-to-guides/how-to-import/#demultiplexed-sequence-data
 # On eddie
@@ -128,3 +130,7 @@ qsub otu_cluster_closedref_set2.sh
 qsub build_tree_otu_set2.sh
 # Closed-reference
 qsub build_tree_otu_cr_set2.sh
+
+## Metadata cleaning
+# The script was stored and executed in the metadata directory 
+./metadata/metadata_cleaning.R
