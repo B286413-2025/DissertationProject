@@ -110,15 +110,21 @@ qsub build_tree.sh
 # And second dataset
 build_tree_set2_short.sh
 
-## OTU Clustering
+## OTU clustering
 ## OTU read preparation
 qsub batch_otu_prep_set2.sh
 
 ## Merging artifacts
 qsub otu_merge.sh
 
-## 97% Similarity Clustering
+## 97% similarity clustering
 # De-novo
 qsub otu_cluster_set2.sh
 # Closed-reference
 qsub otu_cluster_closedref_set2.sh
+
+## Phylogenetic trees
+# De-novo
+qsub build_tree_otu_set2.sh
+# Closed-reference
+qsub build_tree_otu_cr_set2.sh
