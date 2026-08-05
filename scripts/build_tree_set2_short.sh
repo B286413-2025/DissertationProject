@@ -6,6 +6,8 @@
 #$ -o ../logs/$JOB_NAME.out
 #$ -e ../logs/$JOB_NAME.err
 
+## Script for building a phylogenetic tree, second dataset (ASV pipeline)
+
 set -euo pipefail
 
 mkdir -p ../logs

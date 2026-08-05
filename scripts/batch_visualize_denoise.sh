@@ -8,6 +8,7 @@
 
 set -euo pipefail
 
+# List of file names
 base=$(sed -n "${SGE_TASK_ID}p" filestoprocess_v4.txt)
 
 ./visualize_denoise_outputs.sh "${base}"

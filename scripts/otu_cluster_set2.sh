@@ -10,7 +10,7 @@
 ## A script to perform de-novo OTU clustering of the joined reads and taxonomic assignment
 ## Can only run after otu_prep.sh has finished!
 
-#  Inspiration from: https://docs.qiime2.org/2024.10/tutorials/otu-clustering/
+# Inspiration from: https://docs.qiime2.org/2024.10/tutorials/otu-clustering/
 
 set -euo pipefail
 mkdir -p ../logs ../otu_otus_set2

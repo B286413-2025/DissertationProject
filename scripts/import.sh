@@ -1,4 +1,7 @@
 #!/bin/bash -l
+
+## Worker script for importing into QIIME2
+
 set -euo pipefail
 
 # Running directory from the CLI

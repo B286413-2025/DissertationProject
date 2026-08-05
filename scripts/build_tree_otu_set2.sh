@@ -6,6 +6,8 @@
 #$ -o ../logs/$JOB_NAME.out
 #$ -e ../logs/$JOB_NAME.err
 
+## Script for building a phylogenetic tree, de-novo OTU
+
 set -euo pipefail
 
 mkdir -p ../logs

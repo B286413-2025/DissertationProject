@@ -6,6 +6,8 @@
 #$ -o ../logs/$JOB_NAME.out
 #$ -e ../logs/$JOB_NAME.err
 
+## A script for taxonomic assignment of the second dataset (ASV pipeline)
+
 set -euo pipefail
 mkdir -p ../logs
 mkdir -p ../taxonomy_set2_short

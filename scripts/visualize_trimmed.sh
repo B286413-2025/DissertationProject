@@ -1,4 +1,6 @@
 #!/bin/bash -l
+
+## A script to visualize the trimmed reads
 set -euo pipefail
 
 infile="$1"

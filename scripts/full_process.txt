@@ -102,15 +102,11 @@ qiime tools validate classifier/silva-138.2-ssu-nr99-515f-806r-classifier.qza
 qiime tools peek classifier/silva-138.2-ssu-nr99-515f-806r-classifier.qza
 
 ## Taxonomic assignment
-# Classification
-qsub assign_taxonomy.sh
-# And second dataset
-assign_taxonomy_set2_short.sh
+# Classification (merged dataset)
+qsub assign_taxonomy_set2_short.sh
 
-# Phylogenetic trees
-qsub build_tree.sh
-# And second dataset
-build_tree_set2_short.sh
+# Phylogenetic trees (merged dataset)
+qsub build_tree_set2_short.sh
 
 ## OTU clustering
 ## OTU read preparation

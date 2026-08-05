@@ -6,6 +6,8 @@
 #$ -o ../logs/$JOB_NAME.out
 #$ -e ../logs/$JOB_NAME.err
 
+## Batch script for building a phylogenetic tree (closed-reference OTU) 
+
 set -euo pipefail
 
 mkdir -p ../logs

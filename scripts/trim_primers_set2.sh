@@ -1,5 +1,7 @@
 #!/bin/bash 
 
+## Script for primer trimming
+
 set -euo pipefail
 
 infile="$1"

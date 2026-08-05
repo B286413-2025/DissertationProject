@@ -21,7 +21,6 @@ echo -e "sample-id\tforward-absolute-filepath\treverse-absolute-filepath" > "$ma
 
 while read -r stem; do
   # Getting the forward and reverse paths for each sample
-  # TODO: add the eddie path
   f="$run_dir/raw_data/${stem}"_R1*.fastq.gz
   r="$run_dir/raw_data/${stem}"_R2*.fastq.gz
 

@@ -10,7 +10,7 @@
 ## Closed-reference OTU clustering, matched to the de-novo pipeline.
 ## Uses the same merged, chimera-filtered inputs (must run AFTER otu_prep.sh) and the SAME 97% identity.
 
-#  Inspiration from: https://docs.qiime2.org/2024.10/tutorials/otu-clustering/
+# Inspiration from: https://docs.qiime2.org/2024.10/tutorials/otu-clustering/
 
 set -euo pipefail
 mkdir -p ../logs ../otu_otus_cr_set2

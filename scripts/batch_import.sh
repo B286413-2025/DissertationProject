@@ -8,9 +8,12 @@
 #$ -o ../logs/$JOB_NAME.$TASK_ID.out
 #$ -e ../logs/$JOB_NAME.$TASK_ID.err
 
+## Batch script for QIIME2 importing
+
 set -euo pipefail
 mkdir -p ../logs
 
+# List of directories
 run_dir=$(sed -n "${SGE_TASK_ID}p" filestoprocess.txt)
 ./import.sh "../data_by_date/$run_dir"
 

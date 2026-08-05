@@ -6,6 +6,8 @@
 #$ -o ../logs/$JOB_NAME.out
 #$ -e ../logs/$JOB_NAME.err
 
+## Script for merging the OTU artifacts
+
 set -euo pipefail
 mkdir -p ../logs ../otu_otus_set2
 

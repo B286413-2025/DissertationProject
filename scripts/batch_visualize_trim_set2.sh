@@ -7,8 +7,11 @@
 #$ -o ../logs/$JOB_NAME.$TASK_ID.out
 #$ -e ../logs/$JOB_NAME.$TASK_ID.err
 
+## Batch script for visualization of the trimmed reads, second dataset
+
 set -euo pipefail
 
+# List of file names
 file_base=$(sed -n "${SGE_TASK_ID}p" filestoprocess_set2.txt)
 
 infile="../trimmed/${file_base}_trimmed.qza"

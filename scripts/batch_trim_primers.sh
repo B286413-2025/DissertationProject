@@ -7,8 +7,11 @@
 #$ -o ../logs/$JOB_NAME.$TASK_ID.out
 #$ -e ../logs/$JOB_NAME.$TASK_ID.err
 
+## Batch script for primer trimming (initial dataset)
+
 set -euo pipefail
 
+# List of files names
 file_base=$(sed -n "${SGE_TASK_ID}p" filestoprocess.txt)
 
 infile="../visualization/${file_base}.qza"

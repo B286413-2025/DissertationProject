@@ -8,10 +8,12 @@
 #$ -o ../logs/$JOB_NAME.$TASK_ID.out
 #$ -e ../logs/$JOB_NAME.$TASK_ID.err
 
-set -euo pipefail
+## Batch script for OTU prepping
 
+set -euo pipefail
 mkdir -p ../logs ../otu_prep_set2
 
+# List of file names
 base=$(sed -n "${SGE_TASK_ID}p" filestoprocess_otu.txt)
 
 in_qza="../trimmed/${base}_trimmed.qza"

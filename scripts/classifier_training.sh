@@ -52,7 +52,6 @@ qiime rescript dereplicate \
   --o-dereplicated-taxa silva-138.2-ssu-nr99-tax-derep-uniq.qza
 
 # Training amplicon-specific classifiers
-# TODO: change primers, number of cores and file name
 # TODO: perhpas expand on regions to account for non-primer sequences
 qiime feature-classifier extract-reads \
   --i-sequences silva-138.2-ssu-nr99-seqs-derep-uniq.qza \
@@ -75,4 +74,3 @@ qiime feature-classifier fit-classifier-naive-bayes \
   --i-reference-reads silva-138.2-ssu-nr99-seqs-515f-806r-uniq.qza \
   --i-reference-taxonomy silva-138.2-ssu-nr99-tax-515f-806r-derep-uniq.qza \
   --o-classifier silva-138.2-ssu-nr99-515f-806r-classifier.qza
-
