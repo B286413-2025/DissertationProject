@@ -133,4 +133,10 @@ qsub build_tree_otu_cr_set2.sh
 
 ## Metadata cleaning
 # The script was stored and executed in the metadata directory 
-./metadata/metadata_cleaning.R
+R < ./metadata/metadata_cleaning.R
+
+## Statistical analysis
+# The scripts were stored and executed interactively in the main directory
+# ASV pipeline
+R  
+./statistical_analysis_set2_short.Rmd

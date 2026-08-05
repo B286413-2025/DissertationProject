@@ -1,0 +1,4552 @@
+---
+title: "Dissertation Statistical Analysis"
+author: "B286413"
+date: "2026-06-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## Downloading packages
+# BioManager
+#install.packages("BiocManager", repos = "https://cloud.r-project.org")
+# phyloseq
+#BiocManager::install("phyloseq", ask = FALSE, update = FALSE)
+# QIIME2
+#install.packages("remotes", repos = "https://cloud.r-project.org")
+#remotes::install_github("jbisanz/qiime2R")
+# picante
+#BiocManager::install("picante", ask = FALSE, update = FALSE)
+# ggpubr
+#install.packages("ggpubr")
+# microbiome
+#BiocManager::install("microbiome")
+# lmerTest
+#install.packages("lmerTest")
+#DHARMa
+#install.packages("DHARMa")
+# Masslin2
+#BiocManager::install("Maaslin2")
+# MaAsLin 3
+#BiocManager::install("biobakery/maaslin3")
+# mia
+#BiocManager::install("mia")
+# pairwiseAdonis
+#remotes::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+
+# Loading packages
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(picante)
+library(ggpubr)
+library(microbiome)
+library(lme4)
+library(MASS)
+library(DHARMa)
+library(Maaslin2)
+library(maaslin3)
+library(mia)
+library(emmeans)
+library(pairwiseAdonis)
+
+# Resolving conflicts
+library(conflicted)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::count)
+conflicts_prefer(base::setdiff)
+conflicts_prefer(dplyr::desc)
+conflicts_prefer(base::intersect)
+conflicts_prefer(dplyr::inner_join)
+conflicts_prefer(base::summary)
+conflicts_prefer(dplyr::left_join)
+conflicts_prefer(dplyr::rename)
+conflicts_prefer(base::as.factor)
+
+# Working directory
+setwd("~/project")
+```
+
+## Loading Data
+
+### Data Description
+
+The data were generated following a standard QIIME2 analysis workflow. Files are
+located in the following relative paths:
+* ./denoise_set2_short/merged_asv_table.qza - merged feature table
+* ./metadata/metadata_clean.rds - clean metadata file
+* ./taxonomy_set2_short/merged_taxonomy.qza - taxonomic classification file
+* ./phylogeny_set2_short/rooted_tree.qza - rooted phylogenetic tree
+
+```{r loading_data}
+## Paths
+path_table <- "./denoise_set2_short/merged_asv_table.qza"
+path_tax <- "./taxonomy_set2_short/merged_taxonomy.qza"
+path_tree <- "./phylogeny_set2_short/rooted_tree.qza"
+path_md_rds <- "./metadata/metadata_clean.rds"
+
+# Feature table
+features <- read_qza(path_table)$data
+colnames(features) <- trimws(as.character(colnames(features)))
+
+# Metadata
+md <- readRDS(path_md_rds)
+md <- as.data.frame(md)
+
+# Cleaning sample IDs
+colnames(features) <- trimws(as.character(colnames(features)))
+md$activation_code <- trimws(as.character(md$activation_code))
+md <- md[!is.na(md$activation_code) & md$activation_code != "", , drop = FALSE]
+rownames(md) <- md$activation_code
+
+# Checking duplicates
+stopifnot(anyDuplicated(colnames(features)) == 0)
+stopifnot(anyDuplicated(rownames(md)) == 0)
+
+# Subsetting to metadata overlap, keeping feature-table order
+keep_samples <- colnames(features)[colnames(features) %in% rownames(md)]
+features <- features[, keep_samples, drop = FALSE]
+
+# Reordering metadata to match features columns
+md <- md[colnames(features), , drop = FALSE]
+
+# Sanity check
+stopifnot(identical(colnames(features), rownames(md)))
+
+# Removing absent taxa after subsetting
+keep_taxa_table <- rownames(features)[rowSums(features) > 0]
+features <- features[keep_taxa_table, , drop = FALSE]
+
+# Taxonomy
+tax_df <- read_qza(path_tax)$data
+# Updating row names
+rownames(tax_df) <- as.character(tax_df$Feature.ID)
+# Converting taxonomy into a rank matrix for phyloseq
+tax_mat <- str_split_fixed(as.character(tax_df$Taxon), ";\\s*", n = 7)
+colnames(tax_mat) <- c("Domain", "Phylum", "Class", "Order",
+                       "Family", "Genus", "Species")
+rownames(tax_mat) <- rownames(tax_df)
+
+# Phylogenetic tree
+tree_phylo <- read_qza(path_tree)$data
+
+# Intersection across all components
+common_taxa <- Reduce(intersect, list(
+  rownames(features),
+  rownames(tax_mat),
+  tree_phylo$tip.label
+))
+
+# Pruning all components to shared taxa
+features2 <- features[common_taxa, , drop = FALSE]
+tax_mat2 <- tax_mat[common_taxa, , drop = FALSE]
+tree2_phylo <- ape::keep.tip(tree_phylo, common_taxa)
+
+# phyloseq components
+otu <- otu_table(as.matrix(features2), taxa_are_rows = TRUE)
+tax <- tax_table(tax_mat2)
+tr <- phy_tree(tree2_phylo)
+smd <- sample_data(md)
+
+# phyloseq object
+ps <- phyloseq(otu, tax, tr, smd)
+
+# Verifying object - sanity checks
+ps
+validObject(ps)
+nsamples(ps)
+ntaxa(ps)
+
+# Depth statistics
+summary(sample_sums(ps))
+summary(taxa_sums(ps))
+
+# Zero depth samples
+sum(sample_sums(ps) == 0)
+
+# Initial depth vs. richness inspection
+sample_data(ps)$depth <- sample_sums(ps)
+p <- plot_richness(ps, x = "depth", measures = "Observed") +
+  scale_x_log10() +
+  ggtitle("Observed Richness vs. Depth (pre-filtering)") +
+  ylab("Observed Richness") +
+  xlab("Sample Depth") +
+  theme_bw() +
+  theme(
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(face = "bold", size = 10),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+p
+
+# Lowest-depth samples
+sort(sample_sums(ps))[1:20]
+
+# Highest richness samples
+alpha <- estimate_richness(ps, measures = "Observed")
+rownames(alpha)[order(alpha$Observed, decreasing = TRUE)][1:20]
+alpha[order(alpha$Observed, decreasing = TRUE),
+      "Observed", drop = FALSE][1:20, ]
+```
+
+## Batch Effect Exploration
+
+The hundreds of samples come from different sequencing batches and DNA
+extracting batches. Samples from the same batch were not collected at the same
+time, so there could also be storage effect. The available data contain
+information about sequencing batches only, which was explored fora potential
+effect. This exploration is not included in the final analysis. 
+
+```{r batch_effect, eval=FALSE}
+# Verifying batch is a factor
+sample_data(ps)$batch <- as.factor(sample_data(ps)$batch)
+
+# Adding reads and alpha diversity metrics into sample_data
+sample_data(ps)$depth <- sample_sums(ps)
+alpha <- estimate_richness(ps,
+                           measures = c("Observed", "Shannon", "InvSimpson"))
+sample_data(ps)$observed <- alpha[sample_names(ps), "Observed"]
+sample_data(ps)$shannon  <- alpha[sample_names(ps), "Shannon"]
+sample_data(ps)$simpson  <- alpha[sample_names(ps), "InvSimpson"]
+
+# Faith's PD
+otu_m <- as.matrix(otu_table(ps))
+if (taxa_are_rows(ps)) otu_m <- t(otu_m)
+pd_df <- picante::pd(otu_m, phy_tree(ps))
+faith_pd <- pd_df$PD
+names(faith_pd) <- rownames(pd_df)
+sample_data(ps)$faith_pd <- faith_pd[sample_names(ps)]
+
+# Single plotting table
+meta_batch <- data.frame(sample_data(ps), stringsAsFactors = FALSE) %>%
+  rownames_to_column("sample_id") %>%
+  filter(!is.na(batch)) %>%
+  mutate(batch = factor(batch))
+
+# Reads by batch
+batch_reads <- ggplot(meta_batch, aes(x = batch, y = depth, fill = batch)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "GnBu") +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  ggtitle("Number of Reads by Sequencing Batch") +
+  ylab("Number of Reads") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "bottom"
+  )
+
+# Summary statistics by batch
+reads_summary_batch <- meta_batch %>%
+  group_by(batch) %>%
+  summarize(
+    n = n(),
+    min = min(depth, na.rm = TRUE),
+    max = max(depth, na.rm = TRUE),
+    median = median(depth, na.rm = TRUE),
+    mean = mean(depth, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Alpha diversity boxplots by batch
+batch_alpha <- ggarrange(
+  # Observed ASVs
+  ggplot(meta_batch, aes(x = batch, y = observed, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Shannon's Index
+  ggplot(meta_batch, aes(x = batch, y = shannon, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(meta_batch, aes(x = batch, y = simpson, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(meta_batch, aes(x = batch, y = faith_pd, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+
+batch_alpha <- annotate_figure(batch_alpha,
+                               top =
+                                 text_grob("Alpha Diversity Metrics per Batch",
+                                           face = "bold", size = 14))
+
+# Alpha diversity summary statistics by batch
+alpha_summary_batch <- meta_batch %>%
+  group_by(batch) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(simpson, na.rm = TRUE),
+    max_simpson = max(simpson, na.rm = TRUE),
+    median_simpson = median(simpson, na.rm = TRUE),
+    mean_simpson = mean(simpson, na.rm = TRUE),
+    min_faith = min(faith_pd, na.rm = TRUE),
+    max_faith = max(faith_pd, na.rm = TRUE),
+    median_faith = median(faith_pd, na.rm = TRUE),
+    mean_faith = mean(faith_pd, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Beta diversity and PCoA by batch
+dist_bray <- phyloseq::distance(ps, method = "bray")
+dist_jac <- phyloseq::distance(ps, method = "jaccard", binary = TRUE)
+
+# Previous pruning could have led to a non-dichotomic tree
+# https://github.com/joey711/phyloseq/issues/936
+phy_tree(ps) <- ape::multi2di(phy_tree(ps))
+dist_uwu <- phyloseq::UniFrac(ps, weighted = FALSE, normalized = TRUE)
+dist_wu <- phyloseq::UniFrac(ps, weighted = TRUE,  normalized = TRUE)
+
+# Ordinations
+set.seed(122863)
+ord_bray <- ordinate(ps, method = "PCoA", distance = dist_bray)
+set.seed(122863)
+ord_jac <- ordinate(ps, method = "PCoA", distance = dist_jac)
+set.seed(122863)
+ord_uwu <- ordinate(ps, method = "PCoA", distance = dist_uwu)
+set.seed(122863)
+ord_wu <- ordinate(ps, method = "PCoA", distance = dist_wu)
+
+batch_beta <- ggarrange(
+  plot_ordination(ps, ord_bray, color = "batch") +
+    geom_point(size = 2) +
+    labs(color = "Sequencing batch", caption = "Bray-Curtis PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  plot_ordination(ps, ord_jac, color = "batch") +
+    geom_point(size = 2) +
+    labs(color = "Sequencing batch", caption = "Jaccard (binary) PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  plot_ordination(ps, ord_uwu, color = "batch") +
+    geom_point(size = 2) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Sequencing batch", caption = "Unweighted UniFrac PCoA"),
+
+  plot_ordination(ps, ord_wu, color = "batch") +
+    geom_point(size = 2) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Sequencing batch", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+batch_beta <- annotate_figure(batch_beta,
+                              top =
+                                text_grob("Beta Diversity Metrics per Batch",
+                                          face = "bold", size = 14))
+```
+
+## Filtering Data
+
+Initial inspection in QIIME2 revealed that the raw data contains mitochondrial
+and chloroplast taxa, which should be removed, along with eukaryotic sequences.
+This part will also remove irregular samples that were previously identified.
+
+```{r filtering}
+# Pre-filtering object dimensions
+nsamples(ps) # 1063
+ntaxa(ps)
+summary(sample_sums(ps))
+
+# Metadata
+md_f <- as(sample_data(ps), "data.frame")
+
+# Duplicated samples based on name and dob -------------------------------------
+# Nine in total, two are in the May batch
+dup_keys <- md_f %>%
+  count(name, dob, name = "n") %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+dup_keys
+
+# Duplicated rows for metadata inspection
+dup_rows <- md_f %>%
+  inner_join(dup_keys, by = c("name", "dob")) %>%
+  arrange(name, dob)
+dup_rows
+
+# Duplicated samples to remove based on metadata
+dups <- c(
+  "TW59F9", # Almost identical, fewer samples in the other batch
+  "KHG2HC", # Fewer samples in other batch
+  "VVYVBT", # Low vs. medium physical activity
+  "B9KPQR", # Fewer samples in other batch
+#  "REUBN8", # Low vs. medium physical activity - May batch
+  "ZCJCAR", # No preference, picked the first one
+  "P93VRB", # Overweight vs. normalweight
+  "D2WG8P" # Raw vs. mixed diet
+#  "JKXWMG" # Weight - the other one is in the May batch
+)
+
+# Filtering out "bad" samples --------------------------------------------------
+# Missing metadata (NA, e.g., negative age) - four samples
+missing_md <- unlist(sample_data(ps)[apply(
+  sample_data(ps),
+  1,
+  function(x) any(is.na(x))
+), "activation_code"])
+
+# Irregular samples (writing all, some were already filtered in previous steps)
+bad_samples <- c(
+  dups,
+  missing_md,
+  "GER69C", # Irregularly low depth
+  "86PGKK", # Irregularly low depth
+  "S4F64A", # Low depth - under 40k
+  "NVTNX3", # Low depth - under 40k
+  "PGZJAP", # Low depth - under 40k
+  "E27ADN" # Low depth - under 40k
+)
+
+# Removing samples and verifying consistent remainder
+ps_f <- prune_samples(setdiff(sample_names(ps), bad_samples), ps)
+nsamples(ps_f) # 1047
+
+# Chloroplast, mitochondria and Eukaryota filtering ----------------------------
+# Original occurrences
+sum(grepl("mitochondria", as.vector(tax_table(ps_f)[, "Family"]),
+          ignore.case = TRUE), na.rm = TRUE) # 50 matches
+sum(grepl("chloroplast", as.vector(tax_table(ps_f)[, "Order"]),
+          ignore.case = TRUE), na.rm = TRUE) # 59 matches
+sum(grepl("eukaryota", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 182 matches, 3 times more
+sum(grepl("Unassigned", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 184
+
+# Checking if these are concentrated in particular samples
+contam_taxa <- taxa_names(ps_f)[
+  grepl("eukaryota",
+        as.vector(tax_table(ps_f)[, "Domain"]),
+        ignore.case = TRUE) |
+    grepl("chloroplast",
+          as.vector(tax_table(ps_f)[, "Order"]),
+          ignore.case = TRUE) |
+    grepl("mitochondria",
+          as.vector(tax_table(ps_f)[, "Family"]),
+          ignore.case = TRUE)
+]
+
+ps_contam <- prune_taxa(contam_taxa, ps_f)
+
+# Per-sample summary: contaminant reads, total reads, and proportion
+per_sample <- tibble(
+  sample = sample_names(ps_f),
+  contam_reads = sample_sums(ps_contam)[sample_names(ps_f)],
+  total_reads = sample_sums(ps_f),
+) %>%
+  mutate(contam_prop = contam_reads / total_reads,
+         contam_pct  = 100 * contam_prop) %>%
+  arrange(desc(contam_pct))
+
+# Worst samples
+head(per_sample, 20)
+summary(per_sample$contam_pct)
+
+# Some more Eukaryota investigation --------------------------------------------
+# Percentage
+sum(grepl("eukaryota", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) * 100 / ntaxa(ps_f) # 1.439%
+
+# Singletons
+euk_taxa <- taxa_names(ps_f)[grepl("eukaryota",
+                                   as.vector(tax_table(ps_f)[, "Domain"]),
+                                   ignore.case = TRUE)]
+euk_sums <- taxa_sums(prune_taxa(euk_taxa, ps_f))
+# 0-24, mean 2.901, median 2
+summary(euk_sums)
+sum(euk_sums == 1) / length(euk_sums) # No singletons
+
+# Per-batch inspection
+ps_euk <- prune_taxa(euk_taxa, ps_f)
+
+otu_euk <- as(otu_table(ps_euk), "matrix")
+if (taxa_are_rows(ps_euk)) {
+  otu_euk <- t(otu_euk)
+}
+batch <- as.character(sample_data(ps_f)$batch)
+euk_batch <- data.frame(sample = sample_names(ps_f), batch,
+                        euk_reads = rowSums(otu_euk),
+                        total = sample_sums(ps_f),
+                        euk_feats = rowSums(otu_euk > 0)) %>%
+  group_by(batch) %>%
+  summarize(n = n(),
+            euk_pct = 100 * sum(euk_reads) / sum(total),
+            mean_euk_feats = mean(euk_feats),
+            .groups = "drop") %>%
+  arrange(desc(euk_pct))
+euk_batch
+
+# Filtering based on taxa ------------------------------------------------------
+# High content of eukaryotic sequences in 21_May_2026, excluding batch
+ps_f <- subset_samples(ps_f, batch != "21-05-26")
+ps_f <- prune_taxa(taxa_sums(ps_f) > 0, ps_f)
+
+# Contaminant occurrences
+sum(grepl("mitochondria", as.vector(tax_table(ps_f)[, "Family"]),
+          ignore.case = TRUE), na.rm = TRUE) # 49 matches
+sum(grepl("chloroplast", as.vector(tax_table(ps_f)[, "Order"]),
+          ignore.case = TRUE), na.rm = TRUE) # 57 matches
+sum(grepl("eukaryota", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 71 matches
+sum(grepl("Unassigned", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 120
+
+# Filtering out contaminants
+ps_f <- subset_taxa(
+  ps_f,
+  !grepl("mitochondria", Family, ignore.case = TRUE) &
+    !grepl("chloroplast", Order, ignore.case = TRUE) &
+    !grepl("eukaryota", Domain, ignore.case = TRUE)
+)
+ps_f <- prune_taxa(taxa_sums(ps_f) > 0, ps_f)
+
+# Checking filtered object
+nsamples(ps_f) # 957
+ntaxa(ps_f) # 11762
+summary(sample_sums(ps_f)) # Min depth - 41051
+```
+
+## Rarefaction
+
+### Rarefaction Curves
+
+Different methods of "normalization" can be used before conducting statistical
+analyses, rarefaction remains one of the best ones (Schloss, 2024). Since the
+metadata required manipulation, rarefaction curves are produced in R (rather
+than QIIME2).
+
+```{r rarefaction_curves}
+# Help from: https://www.youtube.com/watch?v=_OEdFjc1D9I
+# Debugging with ELM (GPT 5.2), https://elm.edina.ac.uk/elm/elm
+# OTU table as samples x taxa
+otu_mat <- as(otu_table(ps_f), "matrix")
+if (taxa_are_rows(ps_f)) otu_mat <- t(otu_mat)
+
+# Batch vector
+batch <- as.character(sample_data(ps_f)$batch)
+names(batch) <- sample_names(ps_f)
+
+# Align batch to OTU rows
+batch <- batch[rownames(otu_mat)]
+
+# Depth grid
+step_size <- 1000
+depths <- rowSums(otu_mat)
+
+# Verifying 80k is within range
+xmax <- max(c(depths, 80000), na.rm = TRUE)
+depth_grid <- seq(step_size, as.integer(xmax), by = step_size)
+
+# Compute expected richness at each depth
+rich_mat <- suppressWarnings(
+  sapply(depth_grid, function(d) vegan::rarefy(otu_mat, sample = d))
+)
+
+# Verifying steps as columns and samples as rows
+colnames(rich_mat) <- as.character(depth_grid)
+rownames(rich_mat) <- rownames(otu_mat)
+
+# Long data frame for ggplot
+rc_long <- as.data.frame(rich_mat, check.names = FALSE)
+rc_long$sample_id <- rownames(rc_long)
+rc_long <- rc_long %>%
+  pivot_longer(-sample_id, names_to = "depth", values_to = "observed") %>%
+  mutate(
+    depth = as.numeric(depth),
+    batch = batch[sample_id],
+    sample_depth = depths[sample_id]
+  )
+
+# Stopping the plot when exceeding threshold (NA instead)
+rc_long <- rc_long %>%
+  mutate(
+    sample_depth = depths[sample_id],
+    observed = ifelse(depth > sample_depth, NA_real_, observed)
+  )
+
+# Defining panels
+batches <- sort(unique(rc_long$batch))
+
+# Global minimum
+global_min <- min(rc_long$sample_depth, na.rm = TRUE)
+
+threshold_df <- bind_rows(
+  # Minimum within each batch
+  rc_long %>%
+    distinct(sample_id, batch, sample_depth) %>%
+    group_by(batch) %>%
+    summarize(threshold = min(sample_depth, na.rm = TRUE), .groups = "drop") %>%
+    mutate(threshold_type = "min_in_batch"),
+
+  # Global min replicated for each batch
+  tibble(batch = batches,
+         threshold_type = "global_min",
+         threshold = global_min),
+
+  # Fixed thresholds replicated for each batch
+  tibble(batch = batches, threshold_type = "40000", threshold = 40000),
+  tibble(batch = batches, threshold_type = "60000", threshold = 60000),
+  tibble(batch = batches, threshold_type = "80000", threshold = 80000)
+) %>%
+  mutate(
+    threshold_type = factor(
+      threshold_type,
+      levels = c("min_in_batch", "global_min",
+                 "40000", "60000", "80000"),
+      labels = c("Minimum Within Batch", "Global Minimum",
+                 "40,000", "60,000", "80,000")
+    )
+  )
+
+## Plots
+rc_long$batch <- factor(rc_long$batch, levels = batches)
+threshold_df$batch <- factor(threshold_df$batch, levels = batches)
+
+# Plotting a figure for each batch
+for (b in levels(rc_long$batch)) {
+
+  th_b <- threshold_df %>%
+    filter(batch == b) %>%
+    select(threshold_type, threshold)
+
+  df_b <- rc_long %>%
+    filter(batch == b) %>%
+    select(sample_id, depth, observed, sample_depth) %>%
+    tidyr::crossing(th_b) %>%
+    filter(depth <= threshold, depth <= sample_depth)
+
+  p <- ggplot(df_b, aes(x = depth, y = observed, group = sample_id)) +
+    geom_line(alpha = 0.3, linewidth = 0.45, color = "black", na.rm = TRUE) +
+    geom_vline(aes(xintercept = threshold), linetype = 2, color = "red") +
+    facet_wrap(~ threshold_type, nrow = 1, scales = "free_x") +
+    theme_bw() +
+    labs(
+      title = paste0("Rarefaction Curves - Batch ", b),
+      x = "Reads",
+      y = "Expected observed ASVs"
+    ) +
+    theme(
+      strip.text = element_text(size = 9),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+
+  ggsave(
+    filename = file.path(paste0("rarefaction_plots_set2/rarefaction_batch_",
+                                b, ".png")),
+    plot = p,
+    width = 14,
+    height = 4.5,
+    dpi = 300
+  )
+}
+
+## Statistical summary - minimums
+min_depth_by_batch <- data.frame(sample_data(ps_f),
+                                 stringsAsFactors = FALSE) %>%
+  rownames_to_column("sample_id") %>%
+  mutate(
+    depth = sample_sums(ps_f),
+    batch = as.character(batch)
+  ) %>%
+  group_by(batch) %>%
+  summarize(
+    min_reads = min(depth),
+    .groups = "drop"
+  )
+```
+
+### Rarefying
+
+As an initial exploration of batch effect after the chosen normalization method 
+(rarefaction), a single subsampling was performed. Not used in the final
+analysis.
+
+```{r rarefying, eval=FALSE}
+# Pruning phyloseq object
+ps_f <- prune_samples(sample_sums(ps_f) >= global_min, ps_f)
+
+# Subsampling
+ps_r <- rarefy_even_depth(ps_f,
+                          sample.size = global_min,
+                          rngseed = 122863,
+                          replace = FALSE,
+                          verbose = FALSE)
+
+# Sanity check (should be equal depth)
+summary(sample_sums(ps_r))
+```
+
+## Batch Effect Post Rarefaction
+
+Initial exploration of batch effect after accounting for uneven sampling depth
+(rarefying). The same diversity metrics were calculated, with simplified
+statistical tests to explore the effect. Not included in the final analysis.
+
+```{r batch_post_rarefying, eval=FALSE}
+# Add reads and alpha diversity metrics into sample_data
+sample_data(ps_r)$depth <- sample_sums(ps_r)
+alpha_post <- estimate_richness(ps_r,
+                                measures = c("Observed",
+                                             "Shannon",
+                                             "InvSimpson"))
+sample_data(ps_r)$observed <- alpha_post[sample_names(ps_r), "Observed"]
+sample_data(ps_r)$shannon  <- alpha_post[sample_names(ps_r), "Shannon"]
+sample_data(ps_r)$simpson  <- alpha_post[sample_names(ps_r), "InvSimpson"]
+
+# Faith's PD
+otu_post <- as.matrix(otu_table(ps_r))
+if (taxa_are_rows(ps_r)) otu_post <- t(otu_post)
+pd_post <- picante::pd(otu_post, phy_tree(ps_r))
+faith_post <- pd_post$PD
+names(faith_post) <- rownames(pd_post)
+sample_data(ps_r)$faith_pd <- faith_post[sample_names(ps_r)]
+
+# Single plotting table
+meta_batch_post <- data.frame(sample_data(ps_r), stringsAsFactors = FALSE) %>%
+  rownames_to_column("sample_id") %>%
+  filter(!is.na(batch)) %>%
+  mutate(batch = factor(batch))
+
+# Reads by batch
+batch_reads_post <- ggplot(meta_batch_post,
+                           aes(x = batch, y = depth, fill = batch)) +
+  geom_boxplot() +
+  scale_fill_brewer(palette = "GnBu") +
+  stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  ggtitle("Number of Reads by Sequencing Batch") +
+  ylab("Number of Reads") +
+  theme(
+    axis.title.x = element_blank(),
+    axis.text.x = element_blank(),
+    axis.ticks.x = element_blank(),
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5),
+    legend.position = "bottom"
+  )
+
+# Summary statistics by batch
+reads_summary_batch_post <- meta_batch_post %>%
+  group_by(batch) %>%
+  summarize(
+    n = n(),
+    min = min(depth, na.rm = TRUE),
+    max = max(depth, na.rm = TRUE),
+    median = median(depth, na.rm = TRUE),
+    mean = mean(depth, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Alpha diversity boxplots by batch
+batch_alpha_post <- ggarrange(
+  # Observed ASVs
+  ggplot(meta_batch_post, aes(x = batch, y = observed, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Shannon's Index
+  ggplot(meta_batch_post, aes(x = batch, y = shannon, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(meta_batch_post, aes(x = batch, y = simpson, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(meta_batch_post, aes(x = batch, y = faith_pd, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.text.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 3, nrow = 1,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+batch_alpha_post <- annotate_figure(batch_alpha_post,
+                                    top = text_grob(paste0("Alpha Diversity ",
+                                                           "Metrics per Batch ",
+                                                           "Post Rarefaction"),
+                                                    face = "bold", size = 14))
+
+# Alpha diversity summary statistics by batch
+alpha_summary_batch_post <- meta_batch_post %>%
+  group_by(batch) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(simpson, na.rm = TRUE),
+    max_simpson = max(simpson, na.rm = TRUE),
+    median_simpson = median(simpson, na.rm = TRUE),
+    mean_simpson = mean(simpson, na.rm = TRUE),
+    min_faith = min(faith_pd, na.rm = TRUE),
+    max_faith = max(faith_pd, na.rm = TRUE),
+    median_faith = median(faith_pd, na.rm = TRUE),
+    mean_faith = mean(faith_pd, na.rm = TRUE),
+    .groups = "drop"
+  )
+
+# Beta diversity and PCoA by batch
+dist_bray_post <- phyloseq::distance(ps_r, method = "bray")
+dist_jac_post <- phyloseq::distance(ps_r, method = "jaccard", binary = TRUE)
+
+# Previous pruning could have led to a non-dichotomic tree
+# https://github.com/joey711/phyloseq/issues/936
+phy_tree(ps_r) <- ape::multi2di(phy_tree(ps_r))
+dist_uwu_post <- phyloseq::UniFrac(ps_r, weighted = FALSE, normalized = TRUE)
+dist_wu_post <- phyloseq::UniFrac(ps_r, weighted = TRUE,  normalized = TRUE)
+
+# Ordinations
+set.seed(122863)
+ord_bray_post <- ordinate(ps_r, method = "PCoA", distance = dist_bray_post)
+set.seed(122863)
+ord_jac_post <- ordinate(ps_r, method = "PCoA", distance = dist_jac_post)
+set.seed(122863)
+ord_uwu_post <- ordinate(ps_r, method = "PCoA", distance = dist_uwu_post)
+set.seed(122863)
+ord_wu_post <- ordinate(ps_r, method = "PCoA", distance = dist_wu_post)
+
+batch_beta_post <- ggarrange(
+  plot_ordination(ps_r, ord_bray_post, color = "batch") +
+    geom_point(size = 2) +
+    labs(color = "Sequencing batch", caption = "Bray-Curtis PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  plot_ordination(ps_r, ord_jac_post, color = "batch") +
+    geom_point(size = 2) +
+    labs(color = "Sequencing batch", caption = "Jaccard (binary) PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  plot_ordination(ps_r, ord_uwu_post, color = "batch") +
+    geom_point(size = 2) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Sequencing batch", caption = "Unweighted UniFrac PCoA"),
+
+  plot_ordination(ps_r, ord_wu_post, color = "batch") +
+    geom_point(size = 2) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Sequencing batch", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+batch_beta_post <- annotate_figure(batch_beta_post,
+                                   top = text_grob(paste0("Beta Diversity ",
+                                                          "Metrics per Batch ",
+                                                          "Post Rarefaction"),
+                                                   face = "bold", size = 14))
+
+## Exploratory statistical tests
+# For beta metrics only
+# Exploration only - tests do not account for covariates
+sd <- data.frame(sample_data(ps_r))
+
+# PERMANOVA
+set.seed(122863)
+sd <- sd[labels(dist_bray_post), , drop = FALSE]
+permanova_batch_bray <- adonis2(dist_bray_post ~ batch,
+                                data = sd,
+                                permutations = 9999)
+set.seed(122863)
+sd <- sd[labels(dist_jac_post), , drop = FALSE]
+permanova_batch_jaccard <- adonis2(dist_jac_post ~ batch,
+                                   data = sd,
+                                   permutations = 9999)
+set.seed(122863)
+sd <- sd[labels(dist_wu_post), , drop = FALSE]
+permanova_batch_wu <- adonis2(dist_wu_post ~ batch,
+                              data = sd,
+                              permutations = 9999)
+set.seed(122863)
+sd <- sd[labels(dist_uwu_post), , drop = FALSE]
+permanova_batch_uwu <- adonis2(dist_uwu_post ~ batch,
+                               data = sd,
+                               permutations = 9999)
+
+# Dispersion (PERDISP)
+# Helper function to run dispersion
+# Inspired by: https://www.youtube.com/watch?v=oLf0EpMJ4yA
+run_dispersion <- function(dist, group, permutations = 9999) {
+
+  bd <- betadisper(dist, group = group)
+  pt <- permutest(bd, permutations = permutations, pairwise = TRUE)
+
+  list(betadisper = bd, permutest = pt)
+}
+
+# PERMDISP tests for significant PERMANOVA
+sd <- sd[labels(dist_jac_post), , drop = FALSE]
+set.seed(122863)
+disp_jac  <- run_dispersion(dist_jac_post, sd$batch)
+
+sd <- sd[labels(dist_uwu_post), , drop = FALSE]
+set.seed(122863)
+disp_uwu  <- run_dispersion(dist_uwu_post, sd$batch)
+```
+
+## Final Descriptive Statistics
+
+Final descriptive information for samples that will proceed into the statistical
+analysis after filtering. Counts and percentages are calculated per categorical
+variable. Continuous age statistics were also calculated.
+
+```{r descriptive_stats}
+md_f <- sample_data(ps_f)
+md_f <- as(md_f, "data.frame")
+
+# Sex --------------------------------------------------------------------------
+sex_stats <- md_f %>%
+  group_by(sex) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Age --------------------------------------------------------------------------
+# Categorical
+age_cat <- md_f %>%
+  group_by(age_categorical) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Continuous
+# TODO: perhaps plot distribution
+age_cont <- md_f %>%
+  summarize(
+    Minimum = min(age_years),
+    Maximum = max(age_years),
+    Median = median(age_years),
+    Mean = mean(age_years),
+    SD = sd(age_years)
+  )
+
+# Batch ------------------------------------------------------------------------
+# TODO: perhaps look at variables across batches
+batch_stats <- md_f %>%
+  group_by(batch) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Antibiotics ------------------------------------------------------------------
+antibiotics_stats <- md_f %>%
+  group_by(antibiotics) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Neutering  Status ------------------------------------------------------------
+neutering_stats <- md_f %>%
+  group_by(neutered) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Combined w/ sex
+# Twice as many intact males than females
+neutering_sex_stats <- md_f %>%
+  count(neutered, sex, name = "n") %>%
+  mutate(perc = 100 * n / sum(n))
+
+# Physical Activity ------------------------------------------------------------
+active_stats <- md_f %>%
+  group_by(active) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Body Condition ---------------------------------------------------------------
+body_condition_stats <- md_f %>%
+  group_by(body_condition) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Diet -------------------------------------------------------------------------
+diet_stats <- md_f %>%
+  group_by(diet) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Breed ------------------------------------------------------------------------
+breed_stats <- md_f %>%
+  group_by(breed_clean) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Biotics ----------------------------------------------------------------------
+biotics_stats <- md_f %>%
+  group_by(biotics) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Healthy / Symptoms -----------------------------------------------------------
+# Categories are not mutually exclusive
+symptoms_stats <- md_f %>%
+  summarize(
+    healthy = sum(healthy %in% "TRUE"),
+    gastrointestinal = sum(gastro %in% "TRUE"),
+    skin = sum(skin %in% "TRUE"),
+    neurological_behavioral = sum(neuro %in% "TRUE")
+  )
+
+# Vaccination ------------------------------------------------------------------
+vaccination_stats <- md_f %>%
+  group_by(vaccination) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Worming ----------------------------------------------------------------------
+worming_stats <- md_f %>%
+  group_by(worming) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Location ---------------------------------------------------------------------
+location_stats <- md_f %>%
+  group_by(location) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+```
+
+## Alpha Diversity
+
+First assessment of host factors associations with the microbiome is performed
+with alpha diversity metrics (within-sample diversity).
+
+```{r avg_alpha}
+# Calculating alpha diversity metrics with repeated subsampling
+# From:
+# https://bioconductor.posit.co/packages/3.23/bioc/manuals/mia/man/mia.pdf
+
+if (file.exists("avg_results_set2/avg_alpha.RDS")) {
+  tse <- readRDS("avg_results_set2/avg_alpha.RDS")
+} else {
+  # Converting to mia-compatible object
+  tse <- convertFromPhyloseq(ps_f)
+
+  # 100 iterations, requesting five metrics
+  # Chao1 was initially considered but not included in the final analysis
+  # because of:
+  # https://pubmed.ncbi.nlm.nih.gov/38869966/
+  set.seed(122863)
+  tse <- addAlpha(
+    tse,
+    assay.type = "counts",
+    index = c("observed", "chao1", "shannon", "inverse_simpson", "faith"),
+    sample = global_min,
+    niter = 100
+  )
+
+  # Checking and saving object
+  head(colData((tse)))
+  saveRDS(object = tse,
+          file = "avg_results_set2/avg_alpha.RDS")
+}
+
+# Metadata Object
+md_avg <- as.data.frame(colData(tse))
+```
+
+### Observed ASVs
+
+```{r observed}
+# Distribution -----------------------------------------------------------------
+observed_dist <- ggplot(md_avg, aes(x = observed)) +
+  geom_histogram() +
+  ggtitle("Richness Distribution") +
+  xlab("Observed ASVs") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+# Does not look very normal with right tail
+
+# Descriptive statistics -------------------------------------------------------
+observed_stats <- md_avg %>%
+  summarize(
+    Minimum = min(observed),
+    Maximum = max(observed),
+    Median = median(observed),
+    Mean = mean(observed),
+    SD = sd(observed)
+  )
+
+# Linear model -----------------------------------------------------------------
+observed_lm <- lm(observed ~ sex + breed_clean + neutered +
+                    active + body_condition + diet + biotics +
+                    gastro + skin + neuro + healthy + worming +
+                    antibiotics + location + age_categorical + batch,
+                  data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(observed_lm, which = c(1, 2, 4))
+
+# Log-transformation -----------------------------------------------------------
+md_avg$observed_log <- log(md_avg$observed)
+observed_log <- lm(observed_log ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(observed_log, which = c(1, 2, 4))
+
+# Negative binomial (massive overdispersion with poisson) ----------------------
+observed_nb <- glm.nb(observed ~ sex + breed_clean + neutered +
+                        active + body_condition + diet + biotics +
+                        gastro + skin + neuro + healthy + worming +
+                        antibiotics + location + age_categorical + batch,
+                      data = md_avg)
+
+# Checking model fit
+summary(observed_nb)
+testDispersion(observed_nb)
+# Significant dispersion
+# Can occur with with large sample size according to:
+# https://cran.r-project.org/web/packages/DHARMa/vignettes/DHARMa.html
+
+simulated_observed_nb <- simulateResiduals(fittedModel = observed_nb,
+                                           plot = FALSE)
+plot(simulated_observed_nb)
+
+# Individual parameters --------------------------------------------------------
+plotResiduals(simulationOutput, form = ~ batch)
+plotResiduals(simulationOutput, form = ~ breed_clean)
+plotResiduals(simulationOutput, form = ~ sex)
+plotResiduals(simulationOutput, form = ~ neutered)
+plotResiduals(simulationOutput, form = ~ active)
+plotResiduals(simulationOutput, form = ~ body_condition)
+plotResiduals(simulationOutput, form = ~ diet)
+plotResiduals(simulationOutput, form = ~ biotics)
+plotResiduals(simulationOutput, form = ~ antibiotics)
+plotResiduals(simulationOutput, form = ~ worming)
+plotResiduals(simulationOutput, form = ~ healthy)
+plotResiduals(simulationOutput, form = ~ location)
+plotResiduals(simulationOutput,
+              form = ~ age_categorical)
+plotResiduals(simulationOutput, form = ~ gastro)
+plotResiduals(simulationOutput, form = ~ skin)
+plotResiduals(simulationOutput, form = ~ neuro)
+```
+
+### Chao1
+
+```{r chao1, echo=FALSE}
+# Excluded because of:
+# https://pubmed.ncbi.nlm.nih.gov/38869966/
+# Distribution -----------------------------------------------------------------
+chao1_dist <- ggplot(md_avg, aes(x = chao1)) +
+  geom_histogram() +
+  ggtitle("Chao1 Distribution") +
+  xlab("Chao1") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+chao1_stats <- md_avg %>%
+  summarize(
+    Minimum = min(chao1),
+    Maximum = max(chao1),
+    Median = median(chao1),
+    Mean = mean(chao1),
+    SD = sd(chao1)
+  )
+# Does not look very normal with right tail
+
+# Linear model -----------------------------------------------------------------
+chao1_lm <- lm(chao1 ~ sex + breed_clean + neutered +
+                 active + body_condition + diet + biotics +
+                 gastro + skin + neuro + healthy + worming +
+                 antibiotics + location + age_categorical + batch,
+               data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(chao1_lm, which = c(1, 2, 4))
+
+# lmer -------------------------------------------------------------------------
+chao1_lmer <- lmerTest::lmer(chao1 ~ sex + breed_clean + neutered +
+                               active + body_condition + diet + biotics +
+                               gastro + skin + neuro + healthy + worming +
+                               antibiotics + location + age_categorical +
+                               (1 | batch),
+                             data = md_avg)
+
+# Checking model fit
+testDispersion(chao1_lmer)
+simulated_chao_lmer <- simulateResiduals(fittedModel = chao1_lmer,
+                                         plot = FALSE)
+plot(simulated_chao_lmer)
+
+# Log-transformation -----------------------------------------------------------
+md_avg$chao1_log <- log(md_avg$chao1)
+chao1_log <- lm(chao1_log ~ sex + breed_clean + neutered +
+                  active + body_condition + diet + biotics +
+                  gastro + skin + neuro + healthy + worming +
+                  antibiotics + location + age_categorical + batch,
+                data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(chao1_log, which = c(1, 2, 4))
+
+# Gamma GLM --------------------------------------------------------------------
+chao1_gamma <- glm(chao1 ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   family = Gamma(link = "log"), data = md_avg)
+
+# Checking model fit
+testDispersion(chao1_gamma)
+simulated_chao_gamma <- simulateResiduals(fittedModel = chao1_gamma,
+                                          plot = FALSE)
+plot(simulated_chao_gamma)
+
+# Gamma GLMER ------------------------------------------------------------------
+chao1_glmer <- glmer(chao1 ~ sex + breed_clean + neutered +
+                       active + body_condition + diet + biotics +
+                       gastro + skin + neuro + healthy + worming +
+                       antibiotics + location + age_categorical + (1 | batch),
+                     family = Gamma(link = "log"), data = md_avg)
+
+# Checking model fit
+testDispersion(chao1_glmer)
+simulated_chao_glmer <- simulateResiduals(fittedModel = chao1_glmer,
+                                          plot = FALSE)
+plot(simulated_chao_glmer)
+```
+
+### Shannon's Index
+
+```{r shannon}
+# Distribution -----------------------------------------------------------------
+shannon_distribution <- ggplot(md_avg, aes(x = shannon)) +
+  geom_histogram() +
+  ggtitle("Shannon Diversity Distribution") +
+  xlab("Shannon's Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+shannon_stats <- md_avg %>%
+  summarize(
+    Minimum = min(shannon),
+    Maximum = max(shannon),
+    Median = median(shannon),
+    Mean = mean(shannon),
+    SD = sd(shannon)
+  )
+
+# Linear model -----------------------------------------------------------------
+shannon_lm <- lm(shannon ~ sex + breed_clean + neutered +
+                   active + body_condition + diet + biotics +
+                   gastro + skin + neuro + healthy + worming +
+                   antibiotics + location + age_categorical + batch,
+                 data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(shannon_lm, which = c(1, 2, 4))
+
+# lmer -------------------------------------------------------------------------
+# Boundary is singular
+shannon_lmer <- lmerTest::lmer(shannon ~ sex + breed_clean + neutered +
+                                 active + body_condition + diet + biotics +
+                                 gastro + skin + neuro + healthy + worming +
+                                 antibiotics + location + age_categorical +
+                                 (1 | batch),
+                               data = md_avg)
+```
+
+### Simpson's Index
+
+```{r inverse_simpson}
+# Distribution -----------------------------------------------------------------
+simpson_distribution <- ggplot(md_avg, aes(x = inverse_simpson)) +
+  geom_histogram() +
+  ggtitle("Inverse Simpson Diversity Distribution") +
+  xlab("Inverse Simpson Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+# Does not look very normal with left tail
+# But not too bad, a weaker transformation (e.g., square-root) might be better
+
+# Descriptive statistics -------------------------------------------------------
+simpson_stats <- md_avg %>%
+  summarize(
+    Minimum = min(inverse_simpson),
+    Maximum = max(inverse_simpson),
+    Median = median(inverse_simpson),
+    Mean = mean(inverse_simpson),
+    SD = sd(inverse_simpson)
+  )
+
+# Linear model -----------------------------------------------------------------
+simpson_lm <- lm(inverse_simpson ~ sex + breed_clean + neutered +
+                   active + body_condition + diet + biotics +
+                   gastro + skin + neuro + healthy + worming +
+                   antibiotics + location + age_categorical + batch,
+                 data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(simpson_lm, which = c(1, 2, 4))
+
+# Log Transformation -----------------------------------------------------------
+md_avg$simpson_log <- log(md_avg$inverse_simpson)
+simpson_log <- lm(simpson_log ~ sex + breed_clean + neutered +
+                    active + body_condition + diet + biotics +
+                    gastro + skin + neuro + healthy + worming +
+                    antibiotics + location + age_categorical + batch,
+                  data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(simpson_log, which = c(1, 2, 4))
+
+# Square-root Transformation ---------------------------------------------------
+md_avg$simpson_sqrt <- sqrt(md_avg$inverse_simpson)
+simpson_sqrt <- lm(simpson_sqrt ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(simpson_sqrt, which = c(1, 2, 4))
+
+# Transformed distribution -----------------------------------------------------
+simpson_sqrt_dist <- ggplot(md_avg, aes(x = simpson_sqrt)) +
+  geom_histogram() +
+  ggtitle("Square-root Inverse Simpson Distribution") +
+  xlab("Square-root Inverse Simpson Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# lmer -------------------------------------------------------------------------
+# Boundary is singular
+simpson_lmer <- lmerTest::lmer(simpson_sqrt ~ sex + breed_clean + neutered +
+                                 active + body_condition + diet + biotics +
+                                 gastro + skin + neuro + healthy + worming +
+                                 antibiotics + location + age_categorical +
+                                 (1 | batch),
+                               data = md_avg)
+```
+
+### Faith's PD
+
+```{r faith_pd}
+# Distribution -----------------------------------------------------------------
+faith_distribution <- ggplot(md_avg, aes(x = faith)) +
+  geom_histogram() +
+  ggtitle("Faith's Phylogenetic Distance Distribution") +
+  xlab("Faith's PD") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+# Does not look very normal with right tail
+
+# Descriptive statistics -------------------------------------------------------
+faith_stats <- md_avg %>%
+  summarize(
+    Minimum = min(faith),
+    Maximum = max(faith),
+    Median = median(faith),
+    Mean = mean(faith),
+    SD = sd(faith)
+  )
+
+# Linear model -----------------------------------------------------------------
+faith_lm <- lm(faith ~ sex + breed_clean + neutered +
+                 active + body_condition + diet + biotics +
+                 gastro + skin + neuro + healthy + worming +
+                 antibiotics + location + age_categorical + batch,
+               data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(faith_lm, which = c(1, 2, 4))
+
+# Log Transformation -----------------------------------------------------------
+md_avg$faith_log <- log(md_avg$faith)
+faith_log <- lm(faith_log ~ sex + breed_clean + neutered +
+                  active + body_condition + diet + biotics +
+                  gastro + skin + neuro + healthy + worming +
+                  antibiotics + location + age_categorical + batch,
+                data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(faith_log, which = 1)
+plot(faith_log, which = 2)
+# Adding a 1:1 line for the Q-Q plot
+abline(0, 1)
+plot(faith_log, which = 4)
+
+# Transformed distribution -----------------------------------------------------
+faith_log_dist <- ggplot(md_avg, aes(x = faith_log)) +
+  geom_histogram() +
+  ggtitle("Log-transformed Faith PD Distribution") +
+  xlab("Log-transformed Faith PD") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# lmer -------------------------------------------------------------------------
+faith_lmer <- lmerTest::lmer(faith_log ~ sex + breed_clean + neutered +
+                               active + body_condition + diet + biotics +
+                               gastro + skin + neuro + healthy + worming +
+                               antibiotics + location + age_categorical +
+                               (1 | batch),
+                             data = md_avg)
+
+# Check model fit
+testDispersion(faith_lmer)
+simulated_faith_lmer <- simulateResiduals(fittedModel = faith_lmer,
+                                          plot = FALSE)
+plot(simulated_faith_lmer)
+```
+
+### Model Summary
+
+Summary statistics across models. 
+
+```{r alpha_models}
+# Anova type II for models w/o interactions
+# From:
+# https://www.r-bloggers.com/2011/03/anova-%E2%80%93-type-iiiiii-ss-explained/
+
+# Helper function for post-hoc comparisons for significant variables -----------
+# Help from:
+# https://stats.stackexchange.com/questions/102857/post-hoc-after-glm
+# https://cran.r-project.org/web/packages/emmeans/vignettes/AQuickStart.html
+emm_posthoc <- function(fit,
+                        factors,
+                        adjust = "BH") {
+  mf <- model.frame(fit)
+
+  # Factor variables in the model
+  factor_vars <- names(mf)[vapply(mf, is.factor, logical(1))]
+
+  out <- lapply(factors, function(term) {
+
+    # Simplifying calculation grid
+    # Keeping other covariates averaged across levels, proportionally-weighted
+    nuisance_vars <- setdiff(factor_vars, term)
+    emm <- emmeans(
+      fit,
+      as.formula(paste("~", term)),
+      nuisance = nuisance_vars,
+      weights = "proportional",
+      type = "response"
+    )
+
+    # Pairwise comparisons
+    prs <- pairs(emm, adjust = adjust, type = "response")
+
+    df <- as.data.frame(summary(prs, infer = TRUE))
+    df$term <- term
+    df
+  })
+
+  do.call(rbind, out)
+}
+
+# Observed - negative binomial -------------------------------------------------
+car::Anova(observed_nb,
+           test.statistic = "LR")
+
+# Post-hoc for significant factors
+# Breed and batch were also significant, but may inflate the results
+sig_observed <- c("active", "body_condition",
+                  "location", "diet", "age_categorical",
+                  "skin", "healthy")
+post_observed <- emm_posthoc(fit = observed_nb,
+                             factors = sig_observed,
+                             adjust = "BH")
+saveRDS(object = post_observed, file = "alpha_stats_set2/post_observed.RDS")
+
+# Chao1 - gamma ----------------------------------------------------------------
+# Excluded from final analysis
+car::Anova(chao1_gamma,
+           test.statistic = "LR")
+
+# Post-hoc for significant factors
+# Breed and batch were also significant, but may inflate the results
+sig_chao <- c("diet", "age_categorical", "body_condition",
+              "skin", "healthy")
+post_chao <- emm_posthoc(fit = chao1_gamma,
+                         factors = sig_chao,
+                         adjust = "BH")
+saveRDS(object = post_chao, file = "alpha_stats_set2/post_chao.RDS")
+
+
+# Shannon - linear model -------------------------------------------------------
+car::Anova(shannon_lm)
+
+# Post-hoc for significant factors
+# Breed was also significant, but may inflate the results
+sig_shannon <- c("antibiotics", "age_categorical", "diet",
+                 "sex", "skin")
+post_shannon <- emm_posthoc(fit = shannon_lm,
+                            factors = sig_shannon,
+                            adjust = "BH")
+saveRDS(object = post_shannon, file = "alpha_stats_set2/post_shannon.RDS")
+
+# Inverse Simpson - sqrt transformation ----------------------------------------
+car::Anova(simpson_sqrt)
+
+# Post-hoc for significant factors
+# Breed was also significant, but may inflate the results
+sig_simpson <- c("antibiotics", "age_categorical",
+                 "sex")
+post_simpson <- emm_posthoc(fit = simpson_sqrt,
+                            factors = sig_simpson,
+                            adjust = "BH")
+saveRDS(object = post_simpson, file = "alpha_stats_set2/post_simpson.RDS")
+
+# Faith's PD - log transformation ----------------------------------------------
+car::Anova(faith_log)
+
+# Post-hoc for significant factors
+# Breed and age were also significant, but may inflate the results
+sig_faith <- c("active", "diet", "age_categorical")
+post_faith <- emm_posthoc(fit = faith_log,
+                          factors = sig_faith,
+                          adjust = "BH")
+saveRDS(object = post_faith, file = "alpha_stats_set2/post_faith.RDS")
+```
+
+### Plots per Variable
+
+Plots of all untransformed alpha metrics for significant covariates.
+
+#### Sex
+
+```{r alpha_sex}
+# Plots
+alpha_sex <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = sex, y = observed, fill = sex)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Chao1
+  # ggplot(md_avg, aes(x = sex, y = chao1, fill = sex)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = sex, y = shannon, fill = sex)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = sex, y = inverse_simpson, fill = sex)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = sex, y = faith, fill = sex)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_sex <- annotate_figure(alpha_sex,
+                             top = text_grob(paste0("Sex - Alpha ",
+                                                    "Diversity Metrics"),
+                                             face = "bold", size = 14))
+
+# Stats
+alpha_summary_sex <- md_avg %>%
+  group_by(sex) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Breed
+
+```{r alpha_breed}
+# TODO: think about plotting 11 categories...
+```
+
+#### Physical Activity
+
+```{r alpha_active}
+# Plots
+alpha_active <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = active, y = observed, fill = active)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = active, y = chao1, fill = active)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = active, y = shannon, fill = active)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = active, y = inverse_simpson, fill = active)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = active, y = faith, fill = active)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_active <- annotate_figure(alpha_active,
+                                top = text_grob(paste0("Physical Activity ",
+                                                       "- Alpha Diversity ",
+                                                       "Metrics"),
+                                                face = "bold", size = 14))
+
+# Stats
+alpha_summary_active <- md_avg %>%
+  group_by(active) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Body Condition
+
+```{r alpha_body_condition}
+## Observed ASVs only...
+# Plots
+alpha_body_condition <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = body_condition, y = observed, fill = body_condition)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = body_condition, y = chao1, fill = body_condition)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = body_condition, y = shannon, fill = body_condition)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = body_condition,
+                     y = inverse_simpson,
+                     fill = body_condition)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = body_condition, y = faith, fill = body_condition)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_body_condition <- annotate_figure(alpha_body_condition,
+                                        top = text_grob(paste0("Body Condition",
+                                                               " - Alpha ",
+                                                               "Diversity ",
+                                                               "Metrics"),
+                                                        face = "bold",
+                                                        size = 14))
+
+# Stats
+alpha_summary_body_condition <- md_avg %>%
+  group_by(body_condition) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Diet
+
+```{r alpha_diet}
+# Plots
+alpha_diet <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = diet, y = observed, fill = diet)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = diet, y = chao1, fill = diet)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = diet, y = shannon, fill = diet)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = diet, y = inverse_simpson, fill = diet)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = diet, y = faith, fill = diet)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_diet <- annotate_figure(alpha_diet,
+                              top = text_grob(paste0("Diet - ",
+                                                     "Alpha Diversity ",
+                                                     "Metrics"),
+                                              face = "bold", size = 14))
+
+# Stats
+alpha_summary_active <- md_avg %>%
+  group_by(diet) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Healthy
+
+```{r alpha_healthy}
+## Only in richness metrics
+# Plots
+alpha_healthy <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = healthy, y = observed, fill = healthy)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = healthy, y = chao1, fill = healthy)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = healthy, y = shannon, fill = healthy)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = healthy, y = inverse_simpson, fill = healthy)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = healthy, y = faith, fill = healthy)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_healthy <- annotate_figure(alpha_healthy,
+                                 top = text_grob(paste0("Health - ",
+                                                        "Alpha Diversity ",
+                                                        "Metrics"),
+                                                 face = "bold", size = 14))
+
+# Stats
+alpha_summary_healthy <- md_avg %>%
+  group_by(healthy) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Skin-related Symptoms
+
+```{r alpha_skin}
+# Plots
+alpha_skin <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = skin, y = observed, fill = skin)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = skin, y = chao1, fill = skin)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = skin, y = shannon, fill = skin)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = skin, y = inverse_simpson, fill = skin)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = skin, y = faith, fill = skin)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_skin <- annotate_figure(alpha_skin,
+                              top = text_grob(paste0("Skin-related Symptoms ",
+                                                     "- Alpha Diversity ",
+                                                     "Metrics"),
+                                              face = "bold", size = 14))
+
+# Stats
+alpha_summary_skin <- md_avg %>%
+  group_by(skin) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Living Environment
+
+```{r alpha_location}
+## Richness metrics only...
+# Plots
+alpha_location <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = location, y = observed, fill = location)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = location, y = chao1, fill = location)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = location, y = shannon, fill = location)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = location, y = inverse_simpson, fill = location)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = location, y = faith, fill = location)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_location <- annotate_figure(alpha_location,
+                                  top = text_grob(paste0("Living Environment ",
+                                                         "- Alpha Diversity ",
+                                                         "Metrics"),
+                                                  face = "bold", size = 14))
+
+# Stats
+alpha_summary_location <- md_avg %>%
+  group_by(location) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Antibiotics
+
+```{r alpha_antibiotics}
+# Plots
+alpha_antibiotics <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = antibiotics, y = observed, fill = antibiotics)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = antibiotics, y = chao1, fill = antibiotics)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = antibiotics, y = shannon, fill = antibiotics)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = antibiotics,
+                     y = inverse_simpson,
+                     fill = antibiotics)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = antibiotics, y = faith, fill = antibiotics)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_antibiotics <- annotate_figure(alpha_antibiotics,
+                                     top = text_grob(paste0("Antibiotics - ",
+                                                            "Alpha Diversity ",
+                                                            "Metrics"),
+                                                     face = "bold", size = 14))
+
+# Stats
+alpha_summary_antibiotics <- md_avg %>%
+  group_by(antibiotics) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Age
+
+```{r alpha_age}
+# Plots
+alpha_age <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = age_categorical,
+                     y = observed,
+                     fill = age_categorical)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = age_categorical,
+  #                    y = chao1,
+  #                    fill = age_categorical)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = age_categorical,
+                     y = shannon,
+                     fill = age_categorical)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = age_categorical,
+                     y = inverse_simpson,
+                     fill = age_categorical)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = age_categorical, y = faith, fill = age_categorical)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_age <- annotate_figure(alpha_age,
+                             top = text_grob(paste0("Age - ",
+                                                    "Alpha Diversity ",
+                                                    "Metrics"),
+                                             face = "bold", size = 14))
+
+# Stats
+alpha_summary_age <- md_avg %>%
+  group_by(age_categorical) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+#### Batch
+
+```{r alpha_batch}
+# Plots
+alpha_batch <- ggarrange(
+
+  # Observed ASVs
+  ggplot(md_avg, aes(x = batch, y = observed, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    #scale_fill_brewer(palette = "GnBu") +
+    ylab("Observed ASVs") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # # Chao1
+  # ggplot(md_avg, aes(x = batch, y = chao1, fill = batch)) +
+  #   geom_boxplot() +
+  #   stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+  #   #scale_fill_brewer(palette = "GnBu") +
+  #   ylab("Chao1") +
+  #   theme(
+  #     axis.title.x = element_blank(),
+  #     axis.text.x = element_blank(),
+  #     axis.ticks.x = element_blank(),
+  #     axis.title.y = element_text(face = "bold", size = 12),
+  #     legend.position = "none"
+  #   ),
+
+  # Shannon's Index
+  ggplot(md_avg, aes(x = batch, y = shannon, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    #scale_fill_brewer(palette = "GnBu") +
+    ylab("Shannon's Index") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Inverse Simpson
+  ggplot(md_avg, aes(x = batch, y = inverse_simpson, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    #scale_fill_brewer(palette = "GnBu") +
+    ylab("Inverse Simpson") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  # Faith's PD
+  ggplot(md_avg, aes(x = batch, y = faith, fill = batch)) +
+    geom_boxplot() +
+    stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
+    #scale_fill_brewer(palette = "GnBu") +
+    ylab("Faith's PD") +
+    theme(
+      axis.title.x = element_blank(),
+      axis.text.x = element_blank(),
+      axis.ticks.x = element_blank(),
+      axis.title.y = element_text(face = "bold", size = 12),
+      legend.position = "none"
+    ),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+alpha_batch <- annotate_figure(alpha_batch,
+                               top = text_grob(paste0("Batch - ",
+                                                      "Alpha Diversity ",
+                                                      "Metrics"),
+                                               face = "bold", size = 14))
+
+# Stats
+alpha_summary_batch <- md_avg %>%
+  group_by(batch) %>%
+  summarize(
+    n = n(),
+    min_observed = min(observed, na.rm = TRUE),
+    max_observed = max(observed, na.rm = TRUE),
+    median_observed = median(observed, na.rm = TRUE),
+    mean_observed = mean(observed, na.rm = TRUE),
+    min_chao1 = min(chao1, na.rm = TRUE),
+    max_chao1 = max(chao1, na.rm = TRUE),
+    median_chao1 = median(chao1, na.rm = TRUE),
+    mean_chao1 = mean(chao1, na.rm = TRUE),
+    min_shannon = min(shannon, na.rm = TRUE),
+    max_shannon = max(shannon, na.rm = TRUE),
+    median_shannon = median(shannon, na.rm = TRUE),
+    mean_shannon = mean(shannon, na.rm = TRUE),
+    min_simpson = min(inverse_simpson, na.rm = TRUE),
+    max_simpson = max(inverse_simpson, na.rm = TRUE),
+    median_simpson = median(inverse_simpson, na.rm = TRUE),
+    mean_simpson = mean(inverse_simpson, na.rm = TRUE),
+    min_faith = min(faith, na.rm = TRUE),
+    max_faith = max(faith, na.rm = TRUE),
+    median_faith = median(faith, na.rm = TRUE),
+    mean_faith = mean(faith, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+## Beta Diversity
+
+Second assessment of host factors associations with the microbiome is performed
+with beta diversity metrics (between-sample diversity). PERMANOVA tests are
+performed, and dispersion is estimated with PERMDISP.
+
+```{r avg_beta}
+# Getting averaged metrics and saving objects ----------------------------------
+# From:
+# https://bioconductor.posit.co/packages/3.23/bioc/manuals/mia/man/mia.pdf
+# 100 iterations, four metrics
+
+# Bray-Curtis
+if (file.exists("avg_results_set2/avg_bray.RDS")) {
+  avg_bray <- readRDS("avg_results_set2/avg_bray.RDS")
+} else {
+  set.seed(122863)
+  avg_bray <- getDissimilarity(
+    tse,
+    method = "bray",
+    assay.type = "counts",
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_bray,
+          file = "avg_results_set2/avg_bray.RDS")
+}
+
+# Jaccard
+if (file.exists("avg_results_set2/avg_jac.RDS")) {
+  avg_jac <- readRDS("avg_results_set2/avg_jac.RDS")
+} else {
+  set.seed(122863)
+  avg_jac <- getDissimilarity(
+    tse,
+    method = "jaccard",
+    assay.type = "counts",
+    binary = TRUE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_jac,
+          file = "avg_results_set2/avg_jac.RDS")
+}
+
+# Unweighted UniFrac
+if (file.exists("avg_results_set2/avg_uwu.RDS")) {
+  avg_uwu <- readRDS("avg_results_set2/avg_uwu.RDS")
+} else {
+  set.seed(122863)
+  avg_uwu <- getDissimilarity(
+    tse, method = "unifrac",
+    name = "uwu",
+    assay.type = "counts",
+    weighted = FALSE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_uwu,
+          file = "avg_results_set2/avg_uwu.RDS")
+}
+
+# Weighted UniFrac
+if (file.exists("avg_results_set2/avg_wu.RDS")) {
+  avg_wu <- readRDS("avg_results_set2/avg_wu.RDS")
+} else {
+  set.seed(122863)
+  avg_wu <- getDissimilarity(
+    tse, method = "unifrac",
+    name = "wu",
+    assay.type = "counts",
+    weighted = TRUE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_wu,
+          file = "avg_results_set2/avg_wu.RDS")
+}
+
+# Helper function to run dispersion --------------------------------------------
+# Inspired by: https://www.youtube.com/watch?v=oLf0EpMJ4yA
+run_dispersion <- function(dist, group, permutations = 999) {
+
+  bd <- betadisper(dist, group = group)
+  pt <- permutest(bd, permutations = permutations)
+
+  list(betadisper = bd, permutest = pt, p_global = pt$tab["Groups", "Pr(>F)"])
+}
+
+# Helper function for pairwise PERMANOVA comparisons ---------------------------
+
+# Adapted from:
+# https://gist.github.com/mcgoodman/58c9d1257fd1625954a4ffa1c3301939
+# And: the pairwise.adonis2() function
+# Using ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+pairwise_permanova <- function(dist, factor_name, covars = NULL, meta,
+                               permutations = 999, adjust = "BH",
+                               seed = 122863) {
+
+  # Aligning metadata rows to the distance object
+  meta <- meta[labels(dist), , drop = FALSE]
+  dmat <- as.matrix(dist)
+
+  # Factor vector and all-level combinations
+  fac <- droplevels(as.factor(meta[[factor_name]]))
+  pairs <- combn(levels(fac), 2, simplify = FALSE)
+
+  # Initializing a results list
+  results <- list()
+
+  # Iterating through the possible combinations, calculating the statistics
+  # for each variable restricted to a pair of values
+  for (pr in pairs) {
+    # Subsetting to the two levels being compared
+    keep <- fac %in% pr
+    d_sub <- as.dist(dmat[keep, keep])
+    m_sub <- droplevels(meta[keep, , drop = FALSE])
+
+    # Keeping only covariates that vary within the pair (more than one level)
+    good_covars <- covars[sapply(covars, function(cv) {
+      nlevels(droplevels(factor(m_sub[[cv]]))) > 1
+    })]
+
+    # Building formula
+    rhs <- paste(c(good_covars, factor_name), collapse = " + ")
+    form <- as.formula(paste("d_sub ~", rhs))
+
+    # Marginal test w/ adjustment for covariates
+    set.seed(seed)
+    fit <- adonis2(form, data = m_sub, by = "margin",
+                   permutations = permutations)
+
+    # Tidy results
+    results[[paste(pr, collapse = "_vs_")]] <- data.frame(
+      comparison = paste(pr, collapse = "_vs_"),
+      n1 = sum(m_sub[[factor_name]] == pr[1]),
+      n2 = sum(m_sub[[factor_name]] == pr[2]),
+      R2 = fit[factor_name, "R2"],
+      F = fit[factor_name, "F"],
+      p = fit[factor_name, "Pr(>F)"]
+    )
+  }
+
+  # Combining and BH-adjustment within current factor
+  out <- do.call(rbind, results)
+  out$p_adj <- p.adjust(out$p, method = adjust)
+  rownames(out) <- NULL
+  out
+}
+
+# Helper function for pairwise PERMDISP comparisons ----------------------------
+
+# Adapted from:
+# https://gist.github.com/mcgoodman/58c9d1257fd1625954a4ffa1c3301939
+# And: the pairwise.adonis2() function
+# Using ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+pairwise_permdisp <- function(dist, factor_name, meta,
+                              permutations = 999, adjust = "BH",
+                              seed = 122863) {
+
+  # Aligning metadata rows to the distance object
+  meta <- meta[labels(dist), , drop = FALSE]
+  dmat <- as.matrix(dist)
+
+  # Factor vector and all level combination
+  fac <- droplevels(as.factor(meta[[factor_name]]))
+  pairs <- combn(levels(fac), 2, simplify = FALSE)
+
+  # Initializing a results list
+  results <- list()
+
+  # Iterating through the possible combinations, calculating the statistics
+  # for each variable restricted to a pair of values
+  for (pr in pairs) {
+
+    # Subsetting to the two levels being compared
+    keep  <- fac %in% pr
+    d_sub <- as.dist(dmat[keep, keep])
+    g_sub <- droplevels(fac[keep])
+
+    # Dispersion test - no covariates
+    set.seed(seed)
+    bd <- betadisper(d_sub, g_sub)
+    pt <- permutest(bd, permutations = permutations)
+
+    # Tidy results
+    results[[paste(pr, collapse = "_vs_")]] <- data.frame(
+      comparison = paste(pr, collapse = "_vs_"),
+      n1 = sum(g_sub == pr[1]),
+      n2 = sum(g_sub == pr[2]),
+      F  = pt$tab["Groups", "F"],
+      p  = pt$tab["Groups", "Pr(>F)"]
+    )
+  }
+
+  # Combining and BH-adjustment within current factor
+  out <- do.call(rbind, results)
+  out$p_adj <- p.adjust(out$p, method = adjust)
+  rownames(out) <- NULL
+  out
+}
+```
+
+### Bray-Curtis Dissimilarity
+
+```{r bray_curtis}
+# PERMANOVA
+if (file.exists("avg_results_set2/permanova_bray.RDS")) {
+  permanova_bray <- readRDS("avg_results_set2/permanova_bray.RDS")
+} else {
+  set.seed(122863)
+  permanova_bray <- adonis2(avg_bray ~ sex + breed_clean + neutered +
+                              active + body_condition + diet + biotics +
+                              gastro + skin + neuro + healthy + worming +
+                              antibiotics + location + age_categorical + batch,
+                            data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_bray, file = "avg_results_set2/permanova_bray.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_set2/disp_bray.RDS")) {
+  disp_bray <- readRDS("avg_results_set2/disp_bray.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_bray), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_bray), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_bray <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_bray,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_bray, file = "avg_results_set2/disp_bray.RDS")
+}
+```
+
+### Jaccard Distance
+
+```{r jaccard}
+# PERMANOVA
+if (file.exists("avg_results_set2/permanova_jac.RDS")) {
+  permanova_jac <- readRDS("avg_results_set2/permanova_jac.RDS")
+} else {
+  set.seed(122863)
+  permanova_jac <- adonis2(avg_jac ~ sex + breed_clean + neutered +
+                             active + body_condition + diet + biotics +
+                             gastro + skin + neuro + healthy + worming +
+                             antibiotics + location + age_categorical + batch,
+                           data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_jac, file = "avg_results_set2/permanova_jac.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_set2/disp_jac.RDS")) {
+  disp_jac <- readRDS("avg_results_set2/disp_jac.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_jac), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_jac), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_jac <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_jac,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_jac, file = "avg_results_set2/disp_jac.RDS")
+}
+```
+
+### Unweighted UniFrace
+
+```{r uwu}
+# PERMANOVA
+if (file.exists("avg_results_set2/permanova_uwu.RDS")) {
+  permanova_uwu <- readRDS("avg_results_set2/permanova_uwu.RDS")
+} else {
+  set.seed(122863)
+  permanova_uwu <- adonis2(avg_uwu ~ sex + breed_clean + neutered +
+                             active + body_condition + diet + biotics +
+                             gastro + skin + neuro + healthy + worming +
+                             antibiotics + location + age_categorical + batch,
+                           data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_uwu, file = "avg_results_set2/permanova_uwu.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_set2/disp_uwu.RDS")) {
+  disp_uwu <- readRDS("avg_results_set2/disp_uwu.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_uwu), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_uwu), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_uwu <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_uwu,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_uwu, file = "avg_results_set2/disp_uwu.RDS")
+}
+```
+
+### Weighted UniFrac
+
+```{r wu}
+# PERMANOVA
+if (file.exists("avg_results_set2/permanova_wu.RDS")) {
+  permanova_wu <- readRDS("avg_results_set2/permanova_wu.RDS")
+} else {
+  set.seed(122863)
+  permanova_wu <- adonis2(avg_wu ~ sex + breed_clean + neutered +
+                            active + body_condition + diet + biotics +
+                            gastro + skin + neuro + healthy + worming +
+                            antibiotics + location + age_categorical + batch,
+                          data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_wu, file = "avg_results_set2/permanova_wu.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_set2/disp_wu.RDS")) {
+  disp_wu <- readRDS("avg_results_set2/disp_wu.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_wu), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_wu), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_wu <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_wu,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_wu, file = "avg_results_set2/disp_wu.RDS")
+}
+```
+
+### Post-hoc Comparisons
+
+Post-hoc pairwise comparisons for the significant multi-level factors.  
+Subsetting the data for each pair combination, and performing a PERMANOVA
+while controlling for the strongest factors. Additional pairwise PERMDISP is
+performed.
+
+```{r beta_posthoc}
+# PERMANOVA pairwise comparisons -----------------------------------------------
+if (file.exists("avg_results_set2/pw_permanova.RDS")) {
+  pw_permanova <- readRDS("avg_results_set2/pw_permanova.RDS")
+} else {
+
+  # Helper function to find significant multi-level factors in a given omnibus
+  # PERMANOVA
+  sig_multilevel <- function(permanova, meta, alpha = 0.05) {
+    terms <- setdiff(rownames(permanova), c("Residual", "Total"))
+
+    # Keeping factors present in metadata
+    terms <- terms[terms %in% names(meta) &
+                     vapply(meta[terms], is.factor, logical(1))]
+
+    # Significant in the omnibus
+    pvals <- permanova[terms, "Pr(>F)"]
+    terms <- terms[!is.na(pvals) & pvals < alpha]
+
+    # Only w/ more than two levels
+    terms[vapply(terms,
+                 function(v) nlevels(droplevels(meta[[v]])) > 2,
+                 logical(1))]
+  }
+
+  # Confounders
+  adj <- c("batch", "age_categorical", "antibiotics", "diet")
+
+  # Helper function to run all significant multi-level factors for one metric
+  run_metric <- function(dist, permanova) {
+    meta_m <- md_avg[labels(dist), , drop = FALSE]
+    facs <- sig_multilevel(permanova, meta_m)
+    if (!length(facs)) return(NULL)
+
+    res <- lapply(facs, function(f) {
+      out <- pairwise_permanova(
+        dist = dist,
+        factor_name = f,
+        # Not adjusting a factor for itself
+        covars = setdiff(adj, f),
+        meta = md_avg
+      )
+      out$term <- f
+      out
+    })
+    do.call(rbind, res)
+  }
+
+  set.seed(122863)
+  pw_permanova <- list(
+    bray = run_metric(avg_bray, permanova_bray),
+    jac = run_metric(avg_jac, permanova_jac),
+    uwu = run_metric(avg_uwu, permanova_uwu),
+    wu = run_metric(avg_wu, permanova_wu)
+  )
+
+  saveRDS(pw_permanova, "avg_results_set2/pw_permanova.RDS")
+}
+
+# PERMDISP pairwise comparisons ------------------------------------------------
+if (file.exists("avg_results_set2/pw_permdisp.RDS")) {
+  pw_permdisp <- readRDS("avg_results_set2/pw_permdisp.RDS")
+} else {
+
+  # Helper function to find significant multi-level factors in a given omnibus
+  # PERMANOVA
+  sig_multilevel <- function(permanova, meta, alpha = 0.05) {
+    terms <- setdiff(rownames(permanova), c("Residual", "Total"))
+
+    # Keeping factors present in metadata
+    terms <- terms[terms %in% names(meta) &
+                     vapply(meta[terms], is.factor, logical(1))]
+
+    # Significant in the omnibus
+    pvals <- permanova[terms, "Pr(>F)"]
+    terms <- terms[!is.na(pvals) & pvals < alpha]
+
+    # Only w/ more than two levels
+    terms[vapply(terms,
+                 function(v) nlevels(droplevels(meta[[v]])) > 2,
+                 logical(1))]
+  }
+
+  # Helper function to run all significant multi-level factors for one metric
+  # (dispersion takes no covariates)
+  disp_metric <- function(dist, permanova) {
+    meta_m <- md_avg[labels(dist), , drop = FALSE]
+    facs <- sig_multilevel(permanova, meta_m)
+    if (!length(facs)) return(NULL)
+
+    res <- lapply(facs, function(f) {
+      out <- pairwise_permdisp(
+        dist = dist,
+        factor_name = f,
+        meta = md_avg
+      )
+      out$term <- f
+      out
+    })
+    do.call(rbind, res)
+  }
+
+  set.seed(122863)
+  pw_permdisp <- list(
+    bray = disp_metric(avg_bray, permanova_bray),
+    jac = disp_metric(avg_jac, permanova_jac),
+    uwu = disp_metric(avg_uwu, permanova_uwu),
+    wu = disp_metric(avg_wu, permanova_wu)
+  )
+
+  saveRDS(pw_permdisp, "avg_results_set2/pw_permdisp.RDS")
+}
+```
+
+### Plots per Variable
+
+Plots and summary statistics for significant covariates.
+
+```{r ordination_plots}
+# Ordination for plots
+set.seed(122863)
+bray_ord <- ordinate(ps_f, method = "PCoA", distance = avg_bray)
+set.seed(122863)
+jac_ord <- ordinate(ps_f, method = "PCoA", distance = avg_jac)
+set.seed(122863)
+uwu_ord <- ordinate(ps_f, method = "PCoA", distance = avg_uwu)
+set.seed(122863)
+wu_ord <- ordinate(ps_f, method = "PCoA", distance = avg_wu)
+```
+
+#### Sex
+
+```{r beta_sex}
+beta_sex <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "sex", shape = "sex") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = sex, lty = sex)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Sex", shape = "Sex",
+         linetype = "Sex", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "sex", shape = "sex") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = sex, lty = sex)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Sex", shape = "Sex",
+         linetype = "Sex", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "sex", shape = "sex") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = sex, lty = sex)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Sex", shape = "Sex",
+         linetype = "Sex", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "sex", shape = "sex") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = sex, lty = sex)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Sex", shape = "Sex",
+         linetype = "Sex", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_sex <- annotate_figure(beta_sex,
+                            top = text_grob(paste0("Sex - Beta ",
+                                                   "Diversity Metrics"),
+                                            face = "bold", size = 14))
+```
+
+#### Breed
+
+```{r beta_breed}
+# TODO: need to think of plotting
+```
+
+#### Physical Activity
+
+```{r beta_active}
+beta_active <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "active", shape = "active") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = active, lty = active)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Physical Activity", shape = "Physical Activity",
+         linetype = "Physical Activity", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "active", shape = "active") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = active, lty = active)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Physical Activity", shape = "Physical Activity",
+         linetype = "Physical Activity", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "active", shape = "active") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = active, lty = active)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Physical Activity", shape = "Physical Activity",
+         linetype = "Physical Activity", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "active", shape = "active") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = active, lty = active)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Physical Activity", shape = "Physical Activity",
+         linetype = "Physical Activity", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_active <- annotate_figure(beta_active,
+                               top = text_grob(paste0("Physical Activity - ",
+                                                      "Beta ",
+                                                      "Diversity Metrics"),
+                                               face = "bold", size = 14))
+```
+
+#### Body Condition
+
+```{r beta_body_condition}
+beta_body_condition <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord,
+                  color = "body_condition", shape = "body_condition") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = body_condition, lty = body_condition)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Body Condition", shape = "Body Condition",
+         linetype = "Body Condition", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord,
+                  color = "body_condition", shape = "body_condition") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = body_condition, lty = body_condition)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Body Condition", shape = "Body Condition",
+         linetype = "Body Condition", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord,
+                  color = "body_condition", shape = "body_condition") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = body_condition, lty = body_condition)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Body Condition", shape = "Body Condition",
+         linetype = "Body Condition", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord,
+                  color = "body_condition", shape = "body_condition") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = body_condition, lty = body_condition)) +
+    scale_linetype_manual(values = c(1, 2, 4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Body Condition", shape = "Body Condition",
+         linetype = "Body Condition", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_body_condition <- annotate_figure(beta_body_condition,
+                                       top = text_grob(paste0("Body Condition ",
+                                                              "- Beta ",
+                                                              "Diversity ",
+                                                              "Metrics"),
+                                                       face = "bold",
+                                                       size = 14))
+```
+
+#### Diet
+
+```{r beta_diet}
+beta_diet <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "diet", shape = "diet") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = diet, lty = diet)) +
+    scale_linetype_manual(values = c(1:6)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Diet", shape = "Diet",
+         linetype = "Diet", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "diet", shape = "diet") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = diet, lty = diet)) +
+    scale_linetype_manual(values = c(1:6)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Diet", shape = "Diet",
+         linetype = "Diet", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "diet", shape = "diet") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = diet, lty = diet)) +
+    scale_linetype_manual(values = c(1:6)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Diet", shape = "Diet",
+         linetype = "Diet", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "diet", shape = "diet") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = diet, lty = diet)) +
+    scale_linetype_manual(values = c(1:6)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Diet", shape = "Diet",
+         linetype = "Diet", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_diet <- annotate_figure(beta_diet,
+                             top = text_grob(paste0("Diet - ",
+                                                    "Beta ",
+                                                    "Diversity Metrics"),
+                                             face = "bold", size = 14))
+```
+
+#### Biotics
+
+```{r beta_biotics}
+beta_biotics <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "biotics", shape = "biotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = biotics, lty = biotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Biotics", shape = "Biotics",
+         linetype = "Biotics", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "biotics", shape = "biotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = biotics, lty = biotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Biotics", shape = "Biotics",
+         linetype = "Biotics", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "biotics", shape = "biotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = biotics, lty = biotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Biotics", shape = "Biotics",
+         linetype = "Biotics", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "biotics", shape = "biotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = biotics, lty = biotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Biotics", shape = "Biotics",
+         linetype = "Biotics", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_biotics <- annotate_figure(beta_biotics,
+                                top = text_grob(paste0("Biotics - ",
+                                                       "Beta ",
+                                                       "Diversity Metrics"),
+                                                face = "bold", size = 14))
+```
+
+#### Skin-related Symptoms
+
+```{r beta_skin}
+beta_skin <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "skin", shape = "skin") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = skin, lty = skin)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Skin-related Symptoms", shape = "Skin-related Symptoms",
+         linetype = "Skin-related Symptoms", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "skin", shape = "skin") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = skin, lty = skin)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Skin-related Symptoms", shape = "Skin-related Symptoms",
+         linetype = "Skin-related Symptoms", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "skin", shape = "skin") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = skin, lty = skin)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Skin-related Symptoms", shape = "Skin-related Symptoms",
+         linetype = "Skin-related Symptoms",
+         caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "skin", shape = "skin") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = skin, lty = skin)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Skin-related Symptoms", shape = "Skin-related Symptoms",
+         linetype = "Skin-related Symptoms", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_skin <- annotate_figure(beta_skin,
+                             top = text_grob(paste0("Skin-related ",
+                                                    "Symptoms - Beta ",
+                                                    "Diversity Metrics"),
+                                             face = "bold", size = 14))
+```
+
+#### Health
+
+```{r beta_healthy}
+beta_healthy <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "healthy", shape = "healthy") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = healthy, lty = healthy)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Healthy", shape = "Healthy",
+         linetype = "Healthy", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "healthy", shape = "healthy") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = healthy, lty = healthy)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Healthy", shape = "Healthy",
+         linetype = "Healthy", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "healthy", shape = "healthy") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = healthy, lty = healthy)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Healthy", shape = "Healthy",
+         linetype = "Healthy", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "healthy", shape = "healthy") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = healthy, lty = healthy)) +
+    scale_linetype_manual(values = c(1:2)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # Longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Healthy", shape = "Healthy",
+         linetype = "Healthy", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_healthy <- annotate_figure(beta_healthy,
+                                top = text_grob(paste0("Health - ",
+                                                       "Beta ",
+                                                       "Diversity Metrics"),
+                                                face = "bold", size = 14))
+```
+
+#### Antibiotics
+
+```{r beta_antibiotics}
+beta_antibiotics <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord,
+                  color = "antibiotics", shape = "antibiotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = antibiotics, lty = antibiotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Antibiotic Usage", shape = "Antibiotic Usage",
+         linetype = "Antibiotic Usage", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "antibiotics", shape = "antibiotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = antibiotics, lty = antibiotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Antibiotic Usage", shape = "Antibiotic Usage",
+         linetype = "Antibiotic Usage", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "antibiotics", shape = "antibiotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = antibiotics, lty = antibiotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Antibiotic Usage", shape = "Antibiotic Usage",
+         linetype = "Antibiotic Usage", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "antibiotics", shape = "antibiotics") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = antibiotics, lty = antibiotics), linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Antibiotic Usage", shape = "Antibiotic Usage",
+         linetype = "Antibiotic Usage", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_antibiotics <- annotate_figure(beta_antibiotics,
+                                    top = text_grob(paste0("Antibiotic Usage ",
+                                                           "- Beta ",
+                                                           "Diversity Metrics"),
+                                                    face = "bold", size = 14))
+```
+
+#### Age
+
+```{r beta_age}
+beta_age <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord,
+                  color = "age_categorical", shape = "age_categorical") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = age_categorical,
+                     lty = age_categorical),
+                 linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Age", shape = "Age",
+         linetype = "Age", caption = "Bray-Curtis PCoA"),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord,
+                  color = "age_categorical", shape = "age_categorical") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = age_categorical,
+                     lty = age_categorical),
+                 linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Age", shape = "Age",
+         linetype = "Age", caption = "Jaccard (binary) PCoA"),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord,
+                  color = "age_categorical", shape = "age_categorical") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = age_categorical,
+                     lty = age_categorical),
+                 linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Age", shape = "Age",
+         linetype = "Age", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord,
+                  color = "age_categorical", shape = "age_categorical") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = age_categorical,
+                     lty = age_categorical),
+                 linewidth = 0.8) +
+    scale_linetype_manual(values = c(1:4)) +
+    # Bigger shape in legend
+    guides(shape = guide_legend(override.aes = list(size = 4))) +
+    # longer line in legend
+    theme(legend.key.width = unit(2.5, "cm")) +
+    labs(color = "Age", shape = "Age",
+         linetype = "Age", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_age <- annotate_figure(beta_age,
+                            top = text_grob(paste0("Age - ",
+                                                   "Beta ",
+                                                   "Diversity Metrics"),
+                                            face = "bold", size = 14))
+```
+
+#### Batch
+
+```{r beta_batch}
+beta_batch <- ggarrange(
+  # Bray-Curtis
+  plot_ordination(ps_f, bray_ord, color = "batch") +
+    geom_point(size = 1) +
+    labs(color = "Batch", caption = "Bray-Curtis PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  # Jaccard
+  plot_ordination(ps_f, jac_ord, color = "batch") +
+    geom_point(size = 1) +
+    labs(color = "Batch", caption = "Jaccard (binary) PCoA") +
+    stat_ellipse(aes(group = batch), linetype = 2),
+
+  # Unweighted UniFrac
+  plot_ordination(ps_f, uwu_ord, color = "batch") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Batch", caption = "Unweighted UniFrac PCoA"),
+
+  # Weighted UniFrac
+  plot_ordination(ps_f, wu_ord, color = "batch") +
+    geom_point(size = 1) +
+    stat_ellipse(aes(group = batch), linetype = 2) +
+    labs(color = "Batch", caption = "Weighted UniFrac PCoA"),
+
+  ncol = 2, nrow = 2,
+  common.legend = TRUE, legend = "bottom", align = "hv"
+)
+beta_batch <- annotate_figure(beta_batch,
+                              top = text_grob(paste0("Batch - ",
+                                                     "Beta ",
+                                                     "Diversity Metrics"),
+                                              face = "bold", size = 14))
+```
+
+## Taxonomy and Abundance
+
+Extracting relative abundance and calculating occurrence by taxonomic ranks.
+
+```{r abundance}
+# Relative abundance
+ps_rel <- microbiome::transform(ps_f, "compositional")
+taxon_table <- psmelt(ps_rel)
+# TODO: perhaps look at the healthy subset
+```
+
+### Phylum
+
+```{r phylum}
+# Retrieving phylum-level information
+# Mean taxa across samples
+tax_table_phy <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Phylum = as.character(Phylum),
+    Phylum = trimws(Phylum),
+    Phylum = na_if(Phylum, ""),
+    Phylum = replace_na(Phylum, "Unclassified")
+  ) %>%
+
+  # Phylum-abundance per sample
+  group_by(Sample, Phylum) %>%
+  summarize(sample_phylum_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of phyla across samples
+  group_by(Phylum) %>%
+  summarize(
+
+    # Number of samples with phyla
+    num_samples = sum(sample_phylum_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_phylum_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_phylum_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_phy$num_samples == 1)
+
+# Top phyla and unclassified
+head(tax_table_phy)
+tax_table_phy[tax_table_phy$Phylum == "Unclassified", ]
+```
+
+### Class
+
+```{r class}
+# Retrieving class-level information
+# Mean taxa across samples
+tax_table_class <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Class = as.character(Class),
+    Class = trimws(Class),
+    Class = na_if(Class, ""),
+    Class = replace_na(Class, "Unclassified")
+  ) %>%
+
+  # Class-abundance per sample
+  group_by(Sample, Class) %>%
+  summarize(sample_class_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of class across samples
+  group_by(Class) %>%
+  summarize(
+
+    # Number of samples with class
+    num_samples = sum(sample_class_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_class_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_class_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_class$num_samples == 1)
+
+# Top classes and unclassified
+head(tax_table_class)
+tax_table_class[tax_table_class$Class == "Unclassified", ]
+```
+
+### Order
+
+```{r order}
+# Retrieving order-level information
+# Mean taxa across samples
+tax_table_order <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Order = as.character(Order),
+    Order = trimws(Order),
+    Order = na_if(Order, ""),
+    Order = replace_na(Order, "Unclassified")
+  ) %>%
+
+  # Order-abundance per sample
+  group_by(Sample, Order) %>%
+  summarize(sample_order_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of order across samples
+  group_by(Order) %>%
+  summarize(
+
+    # Number of samples with order
+    num_samples = sum(sample_order_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_order_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_order_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_order$num_samples == 1)
+
+# Top orders and unclassified
+head(tax_table_order)
+tax_table_order[tax_table_order$Order == "Unclassified", ]
+```
+
+### Family
+
+```{r family}
+# Retrieving family-level information
+# Mean taxa across samples
+tax_table_family <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Family = as.character(Family),
+    Family = trimws(Family),
+    Family = na_if(Family, ""),
+    Family = replace_na(Family, "Unclassified")
+  ) %>%
+
+  # Family-abundance per sample
+  group_by(Sample, Family) %>%
+  summarize(sample_family_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of family across samples
+  group_by(Family) %>%
+  summarize(
+
+    # Number of samples with family
+    num_samples = sum(sample_family_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_family_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_family_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_family$num_samples == 1)
+
+# Top families and unclassified
+head(tax_table_family)
+tax_table_family[tax_table_family$Family == "Unclassified", ]
+```
+
+### Genus
+
+```{r genus}
+# Retrieving genus-level information
+# Mean taxa across samples
+tax_table_genus <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Genus = as.character(Genus),
+    Genus = trimws(Genus),
+    Genus = na_if(Genus, ""),
+    Genus = replace_na(Genus, "Unclassified")
+  ) %>%
+
+  # Genus-abundance per sample
+  group_by(Sample, Genus) %>%
+  summarize(sample_genus_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of genus across samples
+  group_by(Genus) %>%
+  summarize(
+
+    # Number of samples with genus
+    num_samples = sum(sample_genus_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_genus_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_genus_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_genus$num_samples == 1)
+
+# Top genera and unclassified
+head(tax_table_genus)
+tax_table_genus[tax_table_genus$Genus == "Unclassified", ]
+```
+
+### Differential Abundance
+
+Performed in full on the current pipeline only. 
+
+```{r prevalent_abundances}
+# Checking prevalence threshold
+# Helper function to calculate prevalence
+get_prevalence <- function(taxon) {
+  prevalence <- sum(taxon > 0) / length(taxon)
+  prevalence
+}
+
+# Non-rarefied data
+ps_prev <- filter_taxa(ps_f,
+                       function(taxon) get_prevalence(taxon) > 0.1,
+                       prune = TRUE)
+
+# Some checks
+nsamples(ps_prev)
+ntaxa(ps_prev) # 210 taxa remaining
+summary(sample_sums(ps_prev))
+```
+
+#### Models
+
+```{r differential_abundance}
+# According to the tutorial:
+# https://github.com/biobakery/biobakery/wiki/MaAsLin3
+# And manual:
+# www.bioconductor.org/packages//release/bioc/vignettes/maaslin3/inst/doc/maaslin3_manual.html
+
+if (file.exists("maaslin_output_set2/da_model.RDS")) {
+  da_model <- readRDS("maaslin_output_set2/da_model.RDS")
+  da_group_model <- readRDS("maaslin_output_group_set2/da_group_model.RDS")
+} else {
+
+  # Count data pre-rarefaction
+  otu_da <- as(otu_table(ps_f), "matrix")
+  if (taxa_are_rows(ps_f)) otu_da <- t(otu_da)
+  otu_da <- data.frame(otu_da)
+
+  # Appropriate metadata
+  md_da <- data.frame(sample_data(ps_f))
+
+  # Adding recommended sampling depth
+  md_da$read_depth <- sample_sums(ps_f)[rownames(md_da)]
+
+  # Running MaAsLin 3
+  # Selecting known fixed effects and variables with significant associations in
+  # previous analysis. Logic according to:
+  # https://forum.biobakery.org/t/selecting-covariates-maaslin2-da/8887
+  set.seed(122863)
+  da_model <- maaslin3(
+    input_data = otu_da,
+    input_metadata = md_da,
+    output = "maaslin_output_set2",
+    formula = "~ sex + group(breed_clean) + active + body_condition + diet +
+                      biotics + gastro + skin + healthy + antibiotics +
+                      age_categorical + read_depth + group(batch)",
+    normalization = "TSS",
+    transform = "LOG",
+    augment = TRUE,
+    max_significance = 0.1,
+    min_prevalence = 0.1
+  )
+  saveRDS(da_model, file = "maaslin_output_set2/da_model.RDS")
+}
+```
+
+#### Convergence
+
+```{r da_convergence}
+main <- read.delim("maaslin_output_set2/all_results.tsv", check.names = FALSE)
+main$feature <- sub("^X", "", main$feature)
+
+# Number and type of errors
+sum(!is.na(main$error)) # 148
+sum(!is.na(main$error)) * 100 / nrow(main) # error 1.41%, success 98.59%
+table(main$error) # Fitting success - 99.91%
+
+# Checking if failures are concentrated on one variable
+table(main$metadata[!is.na(main$error)])
+
+# Abundance vs. prevalence failures
+table(main$model[!is.na(main$error)])
+```
+
+#### Statistically Signficant Features
+
+```{r sig_da}
+sig <- read.delim("maaslin_output_set2/significant_results.tsv",
+                  check.names = FALSE)
+sig$feature <- sub("^X", "", sig$feature)
+
+# Total significant associations (qval_joint) - 1249
+nrow(sig)
+
+# Individually significant models - 689
+sum(sig$qval_individual < 0.1, na.rm = TRUE)
+
+# Unique feature and metadata (covariate level for non-group) associations - 637
+sig %>%
+  distinct(feature, metadata, value) %>%
+  nrow()
+
+# Unique significant features - 192
+length(unique(sig$feature))
+
+# Abundance vs. prevalence
+table(sig$model)
+
+# Significance per covariate per model
+table(sig$metadata, sig$model)
+
+# Per covariate only
+sig %>%
+  distinct(feature, metadata) %>%
+  count(metadata, sort = TRUE)
+```
+
+#### Summary and Plotting
+
+Summary tables per model type and covariate, divided by levels. Including
+coefficient, and p- and q-values.
+
+```{r da_summary}
+# Debugged with ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+## Readable labels
+# Helper function for table and plot labels
+make_labels <- function(features, tax_mat) {
+  ranks <- c("Domain", "Phylum", "Class", "Order", "Family", "Genus", "Species")
+  tx <- as.data.frame(tax_mat[features, , drop = FALSE],
+                      stringsAsFactors = FALSE)
+  tx$feature <- rownames(tx)
+
+  # Cleaning function
+  clean <- function(x) {
+    x <- str_replace(x, "^[a-z]__", "")
+    x <- trimws(x)
+    x[x == ""] <- NA
+    x
+  }
+  tx[ranks] <- lapply(tx[ranks], clean)
+
+  # Finest taxonomic rank
+  finest <- apply(tx[ranks], 1,
+                  function(r) {
+                    r <- r[!is.na(r)]
+                    if (!length(r)) "Unclassified" else tail(r, 1)
+                  })
+
+  # Extracting phylum
+  phylum <- ifelse(is.na(tx$Phylum), "Unclassified", tx$Phylum)
+
+  # Short and longer labels
+  tibble(feature = tx$feature, phylum = phylum, finest = finest) %>%
+
+    # Consistent labeling
+    arrange(phylum, finest, feature) %>%
+    group_by(phylum) %>%
+    mutate(idx = row_number(),
+           label = paste0(phylum, " ", idx),
+           label_rich  = paste0(finest, " (", phylum, " ", idx, ")")) %>%
+    ungroup()
+}
+
+# Summary tables
+main <- main[is.na(main$error), ]
+
+# Unique labeling for all features
+all_feats <- unique(main$feature)
+global_labels <- make_labels(all_feats, tax_mat)
+
+# Helper function to generate tables per covariate
+# Takes the results table, covariate model type (prevalence/abundance), labels,
+# significance choice and a delimiter for sub headers
+cov_table <- function(df, covariate, model_type, labels,
+                      sig_only = TRUE, delim = "_") {
+
+  # Filtering per covariate and model type
+  sub <- df %>% filter(metadata == covariate, model == model_type)
+
+  # Exiting for no results
+  if (!nrow(sub)) return(NULL)
+
+  # Subsetting relevant information
+  sub <- sub %>%
+    left_join(labels %>%
+                select(feature, label_rich),
+              by = "feature") %>%
+    rename(level = value, coef = coef,
+           p = pval_individual, q = qval_individual)
+
+  # Only significant results
+  if (sig_only) {
+    keep <- sub %>%
+      group_by(feature) %>%
+      summarize(minq = min(q, na.rm = TRUE), .groups = "drop") %>%
+      filter(minq < 0.1) %>%
+      pull(feature)
+    sub <- filter(sub, feature %in% keep)
+    if (!nrow(sub)) return(NULL)
+  }
+
+  # Wide format for readability
+  wide <- sub %>%
+    select(taxon = label_rich, level, coef, p, q) %>%
+    pivot_wider(id_cols = taxon,
+                names_from = level,
+                values_from = c(coef, p, q),
+                names_glue = paste0("{level}", delim, "{.value}"))
+
+  # Ordering so the three sub-columns are together per level
+  lvls <- unique(sub$level)
+  ord  <- as.vector(t(outer(lvls, c("coef", "p", "q"),
+                            function(a, b) paste0(a, delim, b))))
+  wide %>% select(taxon, any_of(ord)) %>% arrange(taxon)
+}
+
+# Wanted covariates
+covariates <- c("sex", "breed_clean", "active", "diet", "biotics",
+                "gastro", "skin", "healthy", "antibiotics", "age_categorical")
+
+# List per model
+tables_abund <- setNames(lapply(covariates, cov_table,
+                                df = main, model_type = "abundance",
+                                labels = global_labels), covariates)
+tables_prev  <- setNames(lapply(covariates, cov_table,
+                                df = main, model_type = "prevalence",
+                                labels = global_labels), covariates)
+
+# Dropping covariates with no significant features
+tables_abund <- tables_abund[!sapply(tables_abund, is.null)]
+tables_prev  <- tables_prev [!sapply(tables_prev, is.null)]
+```
+
+Heatmap plotting the top 25 features (by q-value) across models, including
+significance estimate. Additionally trying to build a single table of the top
+features associated by covariate. 
+
+```{r da_plot}
+# Debugged with ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+# Removing "uninteresting" covariates
+bio <- main %>%
+  filter(!metadata %in% c("breed_clean", "batch", "read_depth"), is.na(error))
+
+# Picking the top features by strongest association (min q across rows)
+top_feats <- bio %>%
+  group_by(feature) %>%
+  summarize(minq = min(qval_individual, na.rm = TRUE, .groups = "drop")) %>%
+  arrange(minq) %>%
+  slice_head(n = 25) %>%
+  pull(feature)
+
+# Data for plotting
+hm <- bio %>%
+  filter(feature %in% top_feats) %>%
+  left_join(global_labels %>%
+              select(feature, label, phylum),
+            by = "feature") %>%
+  mutate(term = ifelse(is.na(value) | value == "",
+                       metadata,
+                       paste0(metadata, ": ", value)),
+
+         # Significance symbol by q-value
+         star = cut(qval_individual,
+                    c(-Inf, 0.001, 0.01, 0.1, Inf),
+                    labels = c("***", "**", "*", "")))
+
+# Heatmap with ggplot
+# https://r-graph-gallery.com/79-levelplot-with-ggplot2.html
+da_heatmap <- ggplot(hm,
+                     aes(x = term,
+                         y = reorder(label, coef),
+                         fill = coef)) +
+  geom_tile(color = "grey90") +
+  geom_text(aes(label = star), size = 3) +
+  # Grouping taxa by phylum and model
+  facet_grid(phylum ~ model, scales = "free", space = "free") +
+  scale_fill_gradient2(low = "#2166AC", mid = "white", high = "#B2182B",
+                       midpoint = 0, name = "Coef") +
+  labs(x = NULL, y = NULL,
+       title = "Differential Abundance - Top 25 Features",
+       caption = paste0("Abundance coef = log-scale; Prevalence coef = ",
+                        "log-odds; * q < 0.1, ** q < 0.01, *** q < 0.001")) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
+        axis.text.y = element_text(size = 12),
+        strip.text.y = element_text(angle = 0),
+        plot.title = element_text(hjust = 0.5, face = "bold"),
+        plot.caption = element_text(size = 12))
+
+# Significant data for summary
+sig_bio <- bio %>%
+  filter(qval_individual < 0.1)
+
+# Summary table
+da_top_table <- sig_bio %>%
+
+  # Filtering for top features
+  filter(feature %in% top_feats) %>%
+
+  # Nice labels
+  left_join(global_labels %>%
+              select(feature, label_rich), by = "feature") %>%
+  transmute(
+    taxon = label_rich,
+    covariate = metadata,
+
+    # Level vs. reference
+    comparison = value,
+    model = model,
+    coef = round(coef, 4),
+    q = signif(qval_individual, 4)
+  ) %>%
+  arrange(covariate, model, q)
+```
