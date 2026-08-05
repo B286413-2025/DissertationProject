@@ -116,3 +116,9 @@ qsub batch_otu_prep_set2.sh
 
 ## Merging artifacts
 qsub otu_merge.sh
+
+## 97% Similarity Clustering
+# De-novo
+qsub otu_cluster_set2.sh
+# Closed-reference
+qsub otu_cluster_closedref_set2.sh
