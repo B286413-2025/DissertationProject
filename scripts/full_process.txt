@@ -140,3 +140,7 @@ R < ./metadata/metadata_cleaning.R
 # ASV pipeline
 R  
 ./statistical_analysis_set2_short.Rmd
+# De-novo OTU
+./statistical_analysis_otu_set2.Rmd
+# Closed-reference OTU
+./statistical_analysis_otu_cr_set2.Rmd

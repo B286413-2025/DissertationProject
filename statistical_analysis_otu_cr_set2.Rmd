@@ -1,0 +1,1967 @@
+---
+title: "Dissertation Statistical Analysis - OTU (closed-reference)"
+author: "B286413"
+date: "2026-07-14"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+## Downloading unavailable packages
+# BioManager
+#install.packages("BiocManager", repos = "https://cloud.r-project.org")
+# phyloseq
+#BiocManager::install("phyloseq", ask = FALSE, update = FALSE)
+# QIIME2
+#install.packages("remotes", repos = "https://cloud.r-project.org")
+#remotes::install_github("jbisanz/qiime2R")
+# picante
+#BiocManager::install("picante", ask = FALSE, update = FALSE)
+# ggpubr
+#install.packages("ggpubr")
+# microbiome
+#BiocManager::install("microbiome")
+# lmerTest
+#install.packages("lmerTest")
+#DHARMa
+#install.packages("DHARMa")
+# Masslin2
+#BiocManager::install("Maaslin2")
+# MaAsLin 3
+#BiocManager::install("biobakery/maaslin3")
+# mia
+#BiocManager::install("mia")
+# pairwiseAdonis
+#remotes::install_github("pmartinezarbizu/pairwiseAdonis/pairwiseAdonis")
+# FSA - Dunn's test
+#install.packages("FSA")
+# effsize - Cliff's delta, Dunn's effect size
+#install.packages("effsize")
+
+# Loading packages
+library(tidyverse)
+library(phyloseq)
+library(qiime2R)
+library(vegan)
+library(picante)
+library(ggpubr)
+library(microbiome)
+library(lme4)
+library(MASS)
+library(DHARMa)
+library(Maaslin2)
+library(maaslin3)
+library(mia)
+library(emmeans)
+library(pairwiseAdonis)
+library(FSA)
+library(effsize)
+
+# Resolving conflicts
+library(conflicted)
+conflicts_prefer(dplyr::filter)
+conflicts_prefer(dplyr::lag)
+conflicts_prefer(dplyr::select)
+conflicts_prefer(dplyr::count)
+conflicts_prefer(base::setdiff)
+conflicts_prefer(dplyr::desc)
+conflicts_prefer(base::intersect)
+conflicts_prefer(dplyr::inner_join)
+conflicts_prefer(base::summary)
+conflicts_prefer(dplyr::left_join)
+conflicts_prefer(dplyr::rename)
+conflicts_prefer(base::as.factor)
+conflicts_prefer(base::unname)
+
+# Working directory
+setwd("~/project")
+```
+
+## Loading Data
+
+### Data Description
+
+* The data was generated following a standard QIIME2 analysis workflow.
+* ./otu_otus_cr_set2/otu97cr_table_lenfilt.qza - merged feature table
+* .metadata/metadata_clean.rds - clean metadata file
+* ./otu_otus_cr_set2/otu97cr_taxonomy.qza - taxonomic classification file
+* ./phylogeny_otu_cr_set2/otu97cr_rooted.qza - rooted phylogenetic tree
+
+```{r loading_data}
+## Paths
+path_table <- "./otu_otus_cr_set2/otu97cr_table_lenfilt.qza"
+path_tax <- "./otu_otus_cr_set2/otu97cr_taxonomy.qza"
+path_tree <- "./phylogeny_otu_cr_set2/otu97cr_rooted.qza"
+path_md_rds <- "./metadata/metadata_clean.rds"
+
+# Feature table
+features <- read_qza(path_table)$data
+colnames(features) <- trimws(as.character(colnames(features)))
+
+# Metadata
+md <- readRDS(path_md_rds)
+md <- as.data.frame(md)
+
+# Cleaning sample IDs
+colnames(features) <- trimws(as.character(colnames(features)))
+md$activation_code <- trimws(as.character(md$activation_code))
+md <- md[!is.na(md$activation_code) & md$activation_code != "", , drop = FALSE]
+rownames(md) <- md$activation_code
+
+# Checking duplicates
+stopifnot(anyDuplicated(colnames(features)) == 0)
+stopifnot(anyDuplicated(rownames(md)) == 0)
+
+# Subsetting to metadata overlap, keeping feature-table order
+keep_samples <- colnames(features)[colnames(features) %in% rownames(md)]
+features <- features[, keep_samples, drop = FALSE]
+
+# Reordering metadata to match features columns
+md <- md[colnames(features), , drop = FALSE]
+
+# Sanity check
+stopifnot(identical(colnames(features), rownames(md)))
+
+# Removing absent taxa after subsetting
+keep_taxa_table <- rownames(features)[rowSums(features) > 0]
+features <- features[keep_taxa_table, , drop = FALSE]
+
+# Taxonomy
+tax_df <- read_qza(path_tax)$data
+# Updating row names
+rownames(tax_df) <- as.character(tax_df$Feature.ID)
+# Converting taxonomy into a rank matrix for phyloseq
+tax_mat <- str_split_fixed(as.character(tax_df$Taxon), ";\\s*", n = 7)
+colnames(tax_mat) <- c("Domain", "Phylum", "Class", "Order",
+                       "Family", "Genus", "Species")
+rownames(tax_mat) <- rownames(tax_df)
+
+# Phylogenetic tree
+tree_phylo <- read_qza(path_tree)$data
+
+# Intersection across all components
+common_taxa <- Reduce(intersect, list(
+  rownames(features),
+  rownames(tax_mat),
+  tree_phylo$tip.label
+))
+
+# Pruning all components to shared taxa
+features2 <- features[common_taxa, , drop = FALSE]
+tax_mat2 <- tax_mat[common_taxa, , drop = FALSE]
+tree2_phylo <- ape::keep.tip(tree_phylo, common_taxa)
+
+# phyloseq components
+otu <- otu_table(as.matrix(features2), taxa_are_rows = TRUE)
+tax <- tax_table(tax_mat2)
+tr <- phy_tree(tree2_phylo)
+smd <- sample_data(md)
+
+# phyloseq object
+ps <- phyloseq(otu, tax, tr, smd)
+
+# Verifying object - sanity checks
+ps
+validObject(ps)
+nsamples(ps)
+ntaxa(ps)
+# Depth statistics
+summary(sample_sums(ps))
+summary(taxa_sums(ps))
+# Zero depth samples
+sum(sample_sums(ps) == 0)
+# Initial depth vs. richness inspection
+sample_data(ps)$depth <- sample_sums(ps)
+p <- plot_richness(ps, x = "depth", measures = "Observed") +
+  scale_x_log10() +
+  ggtitle("Observed Richness vs. Depth (pre-filtering)") +
+  ylab("Observed Richness") +
+  xlab("Sample Depth") +
+  theme_bw() +
+  theme(
+    axis.title.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(face = "bold", size = 10),
+    axis.text.y = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+p
+
+# Lowest-depth samples
+sort(sample_sums(ps))[1:20]
+
+# Highest richness samples
+alpha <- estimate_richness(ps, measures = "Observed")
+rownames(alpha)[order(alpha$Observed, decreasing = TRUE)][1:20]
+alpha[order(alpha$Observed, decreasing = TRUE),
+      "Observed", drop = FALSE][1:20, ]
+```
+
+## Filtering Data
+
+Initial inspection in QIIME2 revealed that the raw data contains mitochondrial
+and chloroplast taxa, which should be removed, along with eukaryotic sequences.
+This part will also remove irregular samples that were previously identified.
+
+```{r filtering}
+# Pre-filtering object dimensions
+nsamples(ps)
+ntaxa(ps)
+summary(sample_sums(ps))
+
+# Metadata
+md_f <- as(sample_data(ps), "data.frame")
+
+# Duplicated samples based on name and dob -------------------------------------
+# Seven remaining due to batch exclusion (21_May_2026)
+dup_keys <- md_f %>%
+  count(name, dob, name = "n") %>%
+  filter(n > 1) %>%
+  arrange(desc(n))
+dup_keys
+
+# Duplicated rows for metadata inspection
+dup_rows <- md_f %>%
+  inner_join(dup_keys, by = c("name", "dob")) %>%
+  arrange(name, dob)
+dup_rows
+
+# Duplicated samples to remove based on metadata
+dups <- c(
+  "TW59F9", # Almost identical, fewer samples in the other batch
+  "KHG2HC", # Fewer samples in other batch
+  "VVYVBT", # Low vs. medium physical activity
+  "B9KPQR", # Fewer samples in other batch
+  "ZCJCAR", # No preference, picked the first one
+  "P93VRB", # Overweight vs. normalweight
+  "D2WG8P" # Raw vs. mixed diet
+)
+
+# Filtering out "bad" samples --------------------------------------------------
+# Missing metadata (NA, e.g., negative age) - four samples
+missing_md <- unlist(sample_data(ps)[apply(
+  sample_data(ps),
+  1,
+  function(x) any(is.na(x))
+), "activation_code"])
+
+# Irregular samples (writing all, some were already filtered in previous steps)
+bad_samples <- c(
+  dups,
+  missing_md,
+  "GER69C", # Irregularly low depth
+  "86PGKK", # Irregularly low depth
+  "NVTNX3", # Low depth - under 40k
+  "E27ADN" # Low depth - under 40k
+)
+
+ps_f <- prune_samples(setdiff(sample_names(ps), bad_samples), ps)
+
+# Chloroplast, mitochondria and Eukaryota filtering ----------------------------
+# Original occurrences
+sum(grepl("mitochondria", as.vector(tax_table(ps_f)[, "Family"]),
+          ignore.case = TRUE), na.rm = TRUE) # 27 matches
+sum(grepl("chloroplast", as.vector(tax_table(ps_f)[, "Order"]),
+          ignore.case = TRUE), na.rm = TRUE) # 92 matches
+sum(grepl("eukaryota", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 3 matches
+sum(grepl("Unassigned", as.vector(tax_table(ps_f)[, "Domain"]),
+          ignore.case = TRUE), na.rm = TRUE) # 0
+
+# Checking if these are concentrated in particular samples
+contam_taxa <- taxa_names(ps_f)[
+  grepl("eukaryota",
+        as.vector(tax_table(ps_f)[, "Domain"]),
+        ignore.case = TRUE) |
+    grepl("chloroplast",
+          as.vector(tax_table(ps_f)[, "Order"]),
+          ignore.case = TRUE) |
+    grepl("mitochondria",
+          as.vector(tax_table(ps_f)[, "Family"]),
+          ignore.case = TRUE)
+]
+
+ps_contam <- prune_taxa(contam_taxa, ps_f)
+
+# Per-sample summary: contaminant reads, total reads, and proportion
+per_sample <- tibble(
+  sample = sample_names(ps_f),
+  contam_reads = sample_sums(ps_contam)[sample_names(ps_f)],
+  total_reads = sample_sums(ps_f),
+) %>%
+  mutate(contam_prop = contam_reads / total_reads,
+         contam_pct  = 100 * contam_prop) %>%
+  arrange(desc(contam_pct))
+
+# Worst samples
+head(per_sample, 20)
+summary(per_sample$contam_pct)
+
+# No need for detailed inspection. Contaminates are low, potentially in
+# accordance with closed-references matching
+
+# Filtering based on taxa ------------------------------------------------------
+ps_f <- subset_taxa(
+  ps_f,
+  !grepl("mitochondria", Family, ignore.case = TRUE) &
+    !grepl("chloroplast", Order, ignore.case = TRUE) &
+    !grepl("eukaryota", Domain, ignore.case = TRUE)
+)
+ps_f <- prune_taxa(taxa_sums(ps_f) > 0, ps_f)
+
+# Checking filtered object
+nsamples(ps_f)
+ntaxa(ps_f) # 15273
+summary(sample_sums(ps_f)) # Min depth - 40566
+```
+
+## Rarefaction
+
+### Rarefaction Curves
+
+Different methods of "normalization" can be used before conducting statistical
+analyses, rarefaction remains one of the best ones (Schloss, 2024). Since the
+metadata required manipulation, rarefaction curves are produced in R (rather
+than QIIME2).
+
+```{r rarefaction_curves}
+# Help from: https://www.youtube.com/watch?v=_OEdFjc1D9I
+# Debugging with ELM (GPT 5.2), https://elm.edina.ac.uk/elm/elm
+# OTU table as samples x taxa
+otu_mat <- as(otu_table(ps_f), "matrix")
+if (taxa_are_rows(ps_f)) otu_mat <- t(otu_mat)
+
+# Batch vector
+batch <- as.character(sample_data(ps_f)$batch)
+names(batch) <- sample_names(ps_f)
+
+# Align batch to OTU rows
+batch <- batch[rownames(otu_mat)]
+
+# Depth grid
+step_size <- 1000
+depths <- rowSums(otu_mat)
+
+# Verifying 80k is within range
+xmax <- max(c(depths, 80000), na.rm = TRUE)
+depth_grid <- seq(step_size, as.integer(xmax), by = step_size)
+
+# Compute expected richness at each depth
+rich_mat <- suppressWarnings(
+  sapply(depth_grid, function(d) vegan::rarefy(otu_mat, sample = d))
+)
+
+# Verifying steps as columns and samples as rows
+colnames(rich_mat) <- as.character(depth_grid)
+rownames(rich_mat) <- rownames(otu_mat)
+
+# Long data frame for ggplot
+rc_long <- as.data.frame(rich_mat, check.names = FALSE)
+rc_long$sample_id <- rownames(rc_long)
+rc_long <- rc_long %>%
+  pivot_longer(-sample_id, names_to = "depth", values_to = "observed") %>%
+  mutate(
+    depth = as.numeric(depth),
+    batch = batch[sample_id],
+    sample_depth = depths[sample_id]
+  )
+
+# Stopping the plot when exceeding threshold (NA instead)
+rc_long <- rc_long %>%
+  mutate(
+    sample_depth = depths[sample_id],
+    observed = ifelse(depth > sample_depth, NA_real_, observed)
+  )
+
+# Defining panels
+batches <- sort(unique(rc_long$batch))
+
+# Global minimum
+global_min <- min(rc_long$sample_depth, na.rm = TRUE)
+
+threshold_df <- bind_rows(
+  # Minimum within each batch
+  rc_long %>%
+    distinct(sample_id, batch, sample_depth) %>%
+    group_by(batch) %>%
+    summarize(threshold = min(sample_depth, na.rm = TRUE), .groups = "drop") %>%
+    mutate(threshold_type = "min_in_batch"),
+
+  # Global min replicated for each batch
+  tibble(batch = batches,
+         threshold_type = "global_min",
+         threshold = global_min),
+
+  # Fixed thresholds replicated for each batch
+  tibble(batch = batches, threshold_type = "40000", threshold = 40000),
+  tibble(batch = batches, threshold_type = "60000", threshold = 60000),
+  tibble(batch = batches, threshold_type = "80000", threshold = 80000)
+) %>%
+  mutate(
+    threshold_type = factor(
+      threshold_type,
+      levels = c("min_in_batch", "global_min",
+                 "40000", "60000", "80000"),
+      labels = c("Minimum Within Batch", "Global Minimum",
+                 "40,000", "60,000", "80,000")
+    )
+  )
+
+## Plots
+rc_long$batch <- factor(rc_long$batch, levels = batches)
+threshold_df$batch <- factor(threshold_df$batch, levels = batches)
+
+# Plotting a figure for each batch
+for (b in levels(rc_long$batch)) {
+
+  th_b <- threshold_df %>%
+    filter(batch == b) %>%
+    select(threshold_type, threshold)
+
+  df_b <- rc_long %>%
+    filter(batch == b) %>%
+    select(sample_id, depth, observed, sample_depth) %>%
+    tidyr::crossing(th_b) %>%
+    filter(depth <= threshold, depth <= sample_depth)
+
+  p <- ggplot(df_b, aes(x = depth, y = observed, group = sample_id)) +
+    geom_line(alpha = 0.3, linewidth = 0.45, color = "black", na.rm = TRUE) +
+    geom_vline(aes(xintercept = threshold), linetype = 2, color = "red") +
+    facet_wrap(~ threshold_type, nrow = 1, scales = "free_x") +
+    theme_bw() +
+    labs(
+      title = paste0("Rarefaction Curves - Batch ", b),
+      x = "Reads",
+      y = "Expected observed ASVs"
+    ) +
+    theme(
+      strip.text = element_text(size = 9),
+      plot.title = element_text(face = "bold", hjust = 0.5)
+    )
+
+  ggsave(
+    filename = file.path(paste0("rarefaction_plots_otu_cr_set2/",
+                                "rarefaction_batch_",
+                                b, ".png")),
+    plot = p,
+    width = 14,
+    height = 4.5,
+    dpi = 300
+  )
+}
+
+## Statistical summary - minimums
+min_depth_by_batch <- data.frame(sample_data(ps_f),
+                                 stringsAsFactors = FALSE) %>%
+  rownames_to_column("sample_id") %>%
+  mutate(
+    depth = sample_sums(ps_f),
+    batch = as.character(batch)
+  ) %>%
+  group_by(batch) %>%
+  summarize(
+    min_reads = min(depth),
+    .groups = "drop"
+  )
+```
+
+## Final Descriptive Statistics
+
+Final descriptive information for samples that will proceed into the statistical
+analysis after filtering. Counts and percentages are calculated per categorical
+variable. Continuous age statistics were also calculated.
+
+```{r descriptive_stats}
+md_f <- sample_data(ps_f)
+md_f <- as(md_f, "data.frame")
+
+# Sex --------------------------------------------------------------------------
+sex_stats <- md_f %>%
+  group_by(sex) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Age --------------------------------------------------------------------------
+# Categorical
+age_cat <- md_f %>%
+  group_by(age_categorical) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Continuous
+age_cont <- md_f %>%
+  summarize(
+    Minimum = min(age_years),
+    Maximum = max(age_years),
+    Median = median(age_years),
+    Mean = mean(age_years),
+    SD = sd(age_years)
+  )
+
+# Batch ------------------------------------------------------------------------
+batch_stats <- md_f %>%
+  group_by(batch) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Antibiotics ------------------------------------------------------------------
+antibiotics_stats <- md_f %>%
+  group_by(antibiotics) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Neutering  Status ------------------------------------------------------------
+neutering_stats <- md_f %>%
+  group_by(neutered) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Combined w/ sex
+# Twice as many intact males than females
+neutering_sex_stats <- md_f %>%
+  count(neutered, sex, name = "n") %>%
+  mutate(perc = 100 * n / sum(n))
+
+# Physical Activity ------------------------------------------------------------
+active_stats <- md_f %>%
+  group_by(active) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Body Condition ---------------------------------------------------------------
+body_condition_stats <- md_f %>%
+  group_by(body_condition) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Diet -------------------------------------------------------------------------
+diet_stats <- md_f %>%
+  group_by(diet) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Breed ------------------------------------------------------------------------
+breed_stats <- md_f %>%
+  group_by(breed_clean) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Biotics ----------------------------------------------------------------------
+biotics_stats <- md_f %>%
+  group_by(biotics) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Healthy / Symptoms -----------------------------------------------------------
+# Categories are not mutually exclusive
+symptoms_stats <- md_f %>%
+  summarize(
+    healthy = sum(healthy %in% "TRUE"),
+    gastrointestinal = sum(gastro %in% "TRUE"),
+    skin = sum(skin %in% "TRUE"),
+    neurological_behavioral = sum(neuro %in% "TRUE")
+  )
+
+# Vaccination ------------------------------------------------------------------
+vaccination_stats <- md_f %>%
+  group_by(vaccination) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Worming ----------------------------------------------------------------------
+worming_stats <- md_f %>%
+  group_by(worming) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+
+# Location ---------------------------------------------------------------------
+location_stats <- md_f %>%
+  group_by(location) %>%
+  summarize(n = n()) %>%
+  mutate(perc = (n / sum(n)) * 100)
+```
+
+## Alpha Diversity
+
+First assessment of host factors associations with the microbiome is performed
+with alpha diversity metrics (within-sample diversity).
+
+```{r avg_alpha}
+# Calculating alpha diversity metrics with repeated subsampling
+# From:
+# https://bioconductor.posit.co/packages/3.23/bioc/manuals/mia/man/mia.pdf
+
+if (file.exists("avg_results_otu_cr_set2/avg_alpha.RDS")) {
+  tse <- readRDS("avg_results_otu_cr_set2/avg_alpha.RDS")
+} else {
+  # Converting to mia-compatible object
+  tse <- convertFromPhyloseq(ps_f)
+
+  # 100 iterations, requesting five metrics
+  # Chao1 was initially considered but not included in the final analysis
+  # because of:
+  # https://pubmed.ncbi.nlm.nih.gov/38869966/
+  set.seed(122863)
+  tse <- addAlpha(
+    tse,
+    assay.type = "counts",
+    index = c("observed", "chao1", "shannon", "inverse_simpson", "faith"),
+    sample = global_min,
+    niter = 100
+  )
+
+  # Checking and saving object
+  head(colData((tse)))
+  saveRDS(object = tse,
+          file = "avg_results_otu_cr_set2/avg_alpha.RDS")
+}
+
+# Metadata Object
+md_avg <- as.data.frame(colData(tse))
+```
+
+### Observed ASVs
+
+```{r observed}
+# Distribution -----------------------------------------------------------------
+observed_dist <- ggplot(md_avg, aes(x = observed)) +
+  geom_histogram() +
+  ggtitle("Richness Distribution") +
+  xlab("Observed OTUs") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+observed_stats <- md_avg %>%
+  summarize(
+    Minimum = min(observed),
+    Maximum = max(observed),
+    Median = median(observed),
+    Mean = mean(observed),
+    SD = sd(observed)
+  )
+
+# Linear model -----------------------------------------------------------------
+observed_lm <- lm(observed ~ sex + breed_clean + neutered +
+                    active + body_condition + diet + biotics +
+                    gastro + skin + neuro + healthy + worming +
+                    antibiotics + location + age_categorical + batch,
+                  data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(observed_lm, which = c(1, 2, 4))
+
+# Log-transformation -----------------------------------------------------------
+md_avg$observed_log <- log(md_avg$observed)
+observed_log <- lm(observed_log ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(observed_log, which = c(1, 2, 4))
+
+# Negative binomial ------------------------------------------------------------
+observed_nb <- glm.nb(observed ~ sex + breed_clean + neutered +
+                        active + body_condition + diet + biotics +
+                        gastro + skin + neuro + healthy + worming +
+                        antibiotics + location + age_categorical + batch,
+                      data = md_avg)
+# Checking model fit
+summary(observed_nb)
+testDispersion(observed_nb)
+
+simulated_observed_nb <- simulateResiduals(fittedModel = observed_nb,
+                                           plot = FALSE)
+plot(simulated_observed_nb)
+```
+
+### Chao1
+
+```{r chao1, echo=FALSE}
+# Excluded because of:
+# https://pubmed.ncbi.nlm.nih.gov/38869966/
+# Distribution -----------------------------------------------------------------
+chao1_dist <- ggplot(md_avg, aes(x = chao1)) +
+  geom_histogram() +
+  ggtitle("Chao1 Distribution") +
+  xlab("Chao1") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+chao1_stats <- md_avg %>%
+  summarize(
+    Minimum = min(chao1),
+    Maximum = max(chao1),
+    Median = median(chao1),
+    Mean = mean(chao1),
+    SD = sd(chao1)
+  )
+
+# Linear model -----------------------------------------------------------------
+chao1_lm <- lm(chao1 ~ sex + breed_clean + neutered +
+                 active + body_condition + diet + biotics +
+                 gastro + skin + neuro + healthy + worming +
+                 antibiotics + location + age_categorical + batch,
+               data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(chao1_lm, which = c(1, 2, 4))
+
+# Gamma GLM --------------------------------------------------------------------
+chao1_gamma <- glm(chao1 ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   family = Gamma(link = "log"), data = md_avg)
+# Checking model fit
+testDispersion(chao1_gamma)
+simulated_chao_gamma <- simulateResiduals(fittedModel = chao1_gamma,
+                                          plot = FALSE)
+plot(simulated_chao_gamma)
+```
+
+### Shannon's Index
+
+```{r shannon}
+# Distribution -----------------------------------------------------------------
+shannon_distribution <- ggplot(md_avg, aes(x = shannon)) +
+  geom_histogram() +
+  ggtitle("Shannon Diversity Distribution") +
+  xlab("Shannon's Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+shannon_stats <- md_avg %>%
+  summarize(
+    Minimum = min(shannon),
+    Maximum = max(shannon),
+    Median = median(shannon),
+    Mean = mean(shannon),
+    SD = sd(shannon)
+  )
+
+# Linear model -----------------------------------------------------------------
+shannon_lm <- lm(shannon ~ sex + breed_clean + neutered +
+                   active + body_condition + diet + biotics +
+                   gastro + skin + neuro + healthy + worming +
+                   antibiotics + location + age_categorical + batch,
+                 data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(shannon_lm, which = c(1, 2, 4))
+```
+
+### Simpson's Index
+
+```{r inverse_simpson}
+# Distribution -----------------------------------------------------------------
+simpson_distribution <- ggplot(md_avg, aes(x = inverse_simpson)) +
+  geom_histogram() +
+  ggtitle("Inverse Simpson Diversity Distribution") +
+  xlab("Inverse Simpson Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+
+# Descriptive statistics -------------------------------------------------------
+simpson_stats <- md_avg %>%
+  summarize(
+    Minimum = min(inverse_simpson),
+    Maximum = max(inverse_simpson),
+    Median = median(inverse_simpson),
+    Mean = mean(inverse_simpson),
+    SD = sd(inverse_simpson)
+  )
+
+# Linear model -----------------------------------------------------------------
+simpson_lm <- lm(inverse_simpson ~ sex + breed_clean + neutered +
+                   active + body_condition + diet + biotics +
+                   gastro + skin + neuro + healthy + worming +
+                   antibiotics + location + age_categorical + batch,
+                 data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(simpson_lm, which = c(1, 2, 4))
+
+# Square-root Transformation ---------------------------------------------------
+md_avg$simpson_sqrt <- sqrt(md_avg$inverse_simpson)
+simpson_sqrt <- lm(simpson_sqrt ~ sex + breed_clean + neutered +
+                     active + body_condition + diet + biotics +
+                     gastro + skin + neuro + healthy + worming +
+                     antibiotics + location + age_categorical + batch,
+                   data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(simpson_sqrt, which = c(1, 2, 4))
+
+# Transformed distribution -----------------------------------------------------
+simpson_sqrt_dist <- ggplot(md_avg, aes(x = simpson_sqrt)) +
+  geom_histogram() +
+  ggtitle("Square-root Inverse Simpson Distribution") +
+  xlab("Square-root Inverse Simpson Index") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+```
+
+### Faith's PD
+
+```{r faith_pd}
+# Distribution -----------------------------------------------------------------
+faith_distribution <- ggplot(md_avg, aes(x = faith)) +
+  geom_histogram() +
+  ggtitle("Faith's Phylogenetic Distance Distribution") +
+  xlab("Faith's PD") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+# Does not look very normal with right tail
+
+# Descriptive statistics -------------------------------------------------------
+faith_stats <- md_avg %>%
+  summarize(
+    Minimum = min(faith),
+    Maximum = max(faith),
+    Median = median(faith),
+    Mean = mean(faith),
+    SD = sd(faith)
+  )
+
+# Linear model -----------------------------------------------------------------
+faith_lm <- lm(faith ~ sex + breed_clean + neutered +
+                 active + body_condition + diet + biotics +
+                 gastro + skin + neuro + healthy + worming +
+                 antibiotics + location + age_categorical + batch,
+               data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(faith_lm, which = c(1, 2, 4))
+
+# Log Transformation -----------------------------------------------------------
+md_avg$faith_log <- log(md_avg$faith)
+faith_log <- lm(faith_log ~ sex + breed_clean + neutered +
+                  active + body_condition + diet + biotics +
+                  gastro + skin + neuro + healthy + worming +
+                  antibiotics + location + age_categorical + batch,
+                data = md_avg)
+
+# Checking model fit
+par(mfrow = c(1, 3))
+plot(faith_log, which = 1)
+plot(faith_log, which = 2)
+# Adding a 1:1 line for the Q-Q plot
+abline(0, 1)
+plot(faith_log, which = 4)
+
+# Transformed distribution -----------------------------------------------------
+faith_log_dist <- ggplot(md_avg, aes(x = faith_log)) +
+  geom_histogram() +
+  ggtitle("Log-transformed Faith PD Distribution") +
+  xlab("Log-transformed Faith PD") +
+  ylab("Count") +
+  theme(
+    axis.title.x = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(face = "bold", size = 12),
+    axis.text.x = element_text(size = 12),
+    plot.title = element_text(face = "bold", size = 14, hjust = 0.5)
+  )
+```
+
+### Model Summary
+
+#### Non-parametric Tests
+
+Non parametric tests (Kruskal-Wallis and Wilcoxon) for metrics that did not hold
+model assumption and could not be transformed.
+
+```{r alpha_non_parametric}
+# Omnibus Kruskal-Wallis (Wilcoxon) --------------------------------------------
+# Helper function for Kruskal-Wallis of an alpha metric against each covariate
+# Takes metadata, alpha metric, vector of covariates and an adjustment method
+kruskal_alpha <- function(data, metric, covariates, adjust = "BH") {
+
+  # Initializing a results list
+  results <- list()
+
+  # Iterating through the covariates
+  for (cv in covariates) {
+    # Covariate as a factor, dropping unused levels
+    g <- droplevels(as.factor(data[[cv]]))
+
+    # Kruskal-Wallis - reduces to Wilcoxon rank-sum for binary factors
+    ht <- kruskal.test(data[[metric]] ~ g)
+
+    # Tidy results
+    results[[cv]] <- data.frame(
+      covariate = cv,
+      n_levels = nlevels(g),
+      chi_sq = unname(ht$statistic),
+      df = unname(ht$parameter),
+      p = ht$p.value
+    )
+  }
+
+  # Combining and BH-adjusting across the covariates
+  out <- do.call(rbind, results)
+  out$p_adj <- p.adjust(out$p, method = adjust)
+  out <- out[order(out$p_adj), ]
+  rownames(out) <- NULL
+  out
+}
+
+# Pairwise comparisons - Dunn's test -------------------------------------------
+# Effect size according to:
+# https://stats.stackexchange.com/questions/612981/
+# And: https://stats.stackexchange.com/questions/179971/
+# Helper function for pairwise post-hoc for a metric for a significant
+# multi-level factor in omnibus or simple effect sizes for binary factors
+# Takes metadata, alpha metric, factor name, and an adjustment method
+dunn_alpha <- function(data, metric, factor_name, adjust = "BH") {
+
+  # Factor as a factor, dropping unused levels
+  g <- droplevels(as.factor(data[[factor_name]]))
+  y <- data[[metric]]
+  lvls <- levels(g)
+
+  # Effect size and CI for binary covariates (no actual Dunn's test)
+  if (length(lvls) == 2) {
+    kt <- kruskal.test(y ~ g)
+    cd <- effsize::cliff.delta(y ~ g)
+    return(data.frame(
+      metric = metric,
+      term = factor_name,
+      comparison = paste(lvls, collapse = " - "),
+      Z = NA_real_,
+      p = kt$p.value,
+
+      # Single comparison, no correction
+      p_adj = kt$p.value,
+      cliff_delta = as.numeric(cd$estimate),
+      ci_lower = as.numeric(cd$conf.int[1]),
+      ci_upper = as.numeric(cd$conf.int[2]),
+      row.names = NULL
+    ))
+  }
+
+  # Dunn's test, BH-adjusted within factor for multi-level factors
+  dt <- FSA::dunnTest(data[[metric]] ~ g, method = NULL)
+
+  # Output
+  out <- dt$res
+
+  # BH correction
+  p_adj <- p.adjust(out$P.unadj, method = adjust)
+
+  # Effect size (Cliff's delta) + CI per comparison
+  eff <- do.call(rbind, lapply(out$Comparison, function(cmp) {
+    lv <- trimws(strsplit(cmp, " - ")[[1]])
+    keep <- g %in% lv
+    cd <- effsize::cliff.delta(y[keep] ~ droplevels(g[keep]))
+    data.frame(cliff_delta = as.numeric(cd$estimate),
+               ci_lower = as.numeric(cd$conf.int[1]),
+               ci_upper = as.numeric(cd$conf.int[2]))
+  }))
+
+  # Tidy output
+  data.frame(
+    metric = metric,
+    term = factor_name,
+    comparison = out$Comparison,
+    Z = out$Z,
+    p = out$P.unadj,
+    p_adj = p.adjust(out$P.unadj, method = adjust),
+    eff,
+    row.names  = NULL
+  )
+}
+
+# Covariates -------------------------------------------------------------------
+covariates <- c("sex", "breed_clean", "neutered", "active",
+                "body_condition", "diet", "biotics", "gastro",
+                "skin", "neuro", "healthy", "worming",
+                "antibiotics", "location", "age_categorical")
+
+# Observed ---------------------------------------------------------------------
+# Biological covariates
+kw_observed <- kruskal_alpha(md_avg, "observed", covariates)
+
+# Batch effect
+kw_observed_batch <- kruskal_alpha(md_avg, "observed", "batch")
+
+# Pairwise comparisons
+dunn_observed_diet <- dunn_alpha(md_avg, "observed", "diet")
+dunn_observed_breed <- dunn_alpha(md_avg, "observed", "breed_clean")
+dunn_observed_age <- dunn_alpha(md_avg, "observed", "age_categorical")
+dunn_observed_active <- dunn_alpha(md_avg, "observed", "active")
+dunn_observed_location <- dunn_alpha(md_avg, "observed", "location")
+dunn_observed_neutered <- dunn_alpha(md_avg, "observed", "neutered")
+
+# Saving results
+post_observed <- list(diet = dunn_observed_diet,
+                      breed = dunn_observed_breed,
+                      neutered = dunn_observed_neutered,
+                      age = dunn_observed_age,
+                      active = dunn_observed_active,
+                      location = dunn_observed_location)
+saveRDS(object = post_observed,
+        file = "alpha_stats_otu_cr_set2/post_observed.RDS")
+
+# Chao1 ------------------------------------------------------------------------
+# Excluded from final analysis
+# Biological covariates
+kw_chao1 <- kruskal_alpha(md_avg, "chao1", covariates)
+
+# Batch effect
+kw_chao1_batch <- kruskal_alpha(md_avg, "chao1", "batch")
+
+# Pairwise comparisons
+dunn_chao1_diet <- dunn_alpha(md_avg, "chao1", "diet")
+dunn_chao1_breed <- dunn_alpha(md_avg, "chao1", "breed_clean")
+dunn_chao1_active <- dunn_alpha(md_avg, "chao1", "active")
+dunn_chao1_age <- dunn_alpha(md_avg, "chao1", "age_categorical")
+dunn_chao1_location <- dunn_alpha(md_avg, "chao1", "location")
+dunn_chao1_neutered <- dunn_alpha(md_avg, "chao1", "neutered")
+
+# Saving results
+post_chao1 <- list(diet = dunn_chao1_diet,
+                   breed = dunn_chao1_breed,
+                   neutered = dunn_chao1_neutered,
+                   age = dunn_chao1_age,
+                   active = dunn_chao1_active,
+                   location = dunn_chao1_location)
+saveRDS(object = post_chao1, file = "alpha_stats_otu_cr_set2/post_chao1.RDS")
+
+# Faith's PD -------------------------------------------------------------------
+
+# Biological covariates
+kw_faith <- kruskal_alpha(md_avg, "faith", covariates)
+
+# Batch effect
+kw_faith_batch <- kruskal_alpha(md_avg, "faith", "batch")
+
+# Pairwise comparisons
+dunn_faith_diet <- dunn_alpha(md_avg, "faith", "diet")
+dunn_faith_breed <- dunn_alpha(md_avg, "faith", "breed_clean")
+dunn_faith_active <- dunn_alpha(md_avg, "faith", "active")
+dunn_faith_age <- dunn_alpha(md_avg, "faith", "age_categorical")
+dunn_faith_antibiotics <- dunn_alpha(md_avg, "faith", "antibiotics")
+dunn_faith_neutered <- dunn_alpha(md_avg, "faith", "neutered")
+
+# Saving results
+post_faith <- list(diet = dunn_faith_diet,
+                   breed = dunn_faith_breed,
+                   neutered = dunn_faith_neutered,
+                   age = dunn_faith_age,
+                   active = dunn_faith_active,
+                   antibiotics = dunn_faith_antibiotics)
+saveRDS(object = post_faith, file = "alpha_stats_otu_cr_set2/post_faith.RDS")
+```
+
+#### Linear Models
+Summary statistics across linear models. 
+
+```{r alpha_models}
+# Anova type II for models w/o interactions
+# From:
+# https://www.r-bloggers.com/2011/03/anova-%E2%80%93-type-iiiiii-ss-explained/
+
+# Helper function for post hoc comparisons for significant variables -----------
+# Help from:
+# https://stats.stackexchange.com/questions/102857/post-hoc-after-glm
+# https://cran.r-project.org/web/packages/emmeans/vignettes/AQuickStart.html
+emm_posthoc <- function(fit,
+                        factors,
+                        adjust = "BH") {
+  mf <- model.frame(fit)
+
+  # Factor variables in the model
+  factor_vars <- names(mf)[vapply(mf, is.factor, logical(1))]
+
+  out <- lapply(factors, function(term) {
+
+    # Simplifying calculation grid
+    # Keeping other covariates averaged across levels, proportionally-weighted
+    nuisance_vars <- setdiff(factor_vars, term)
+    emm <- emmeans(
+      fit,
+      as.formula(paste("~", term)),
+      nuisance = nuisance_vars,
+      weights = "proportional",
+      type = "response"
+    )
+
+    # Pairwise comparisons
+    prs <- pairs(emm, adjust = adjust, type = "response")
+
+    df <- as.data.frame(summary(prs, infer = TRUE))
+    df$term <- term
+    df
+  })
+
+  do.call(rbind, out)
+}
+
+# Shannon - linear model -------------------------------------------------------
+car::Anova(shannon_lm)
+
+# Post-hoc for significant factors
+# Breed was also significant, but may inflate the results
+sig_shannon <- c("antibiotics", "age_categorical", "diet",
+                 "sex", "skin")
+post_shannon <- emm_posthoc(fit = shannon_lm,
+                            factors = sig_shannon,
+                            adjust = "BH")
+saveRDS(object = post_shannon,
+        file = "alpha_stats_otu_cr_set2/post_shannon.RDS")
+
+# Inverse Simpson - sqrt transformation ----------------------------------------
+car::Anova(simpson_sqrt)
+
+# Post-hoc for significant factors
+# Breed was also significant, but may inflate the results
+sig_simpson <- c("antibiotics", "age_categorical",
+                 "sex", "skin")
+post_simpson <- emm_posthoc(fit = simpson_sqrt,
+                            factors = sig_simpson,
+                            adjust = "BH")
+saveRDS(object = post_simpson,
+        file = "alpha_stats_otu_cr_set2/post_simpson.RDS")
+```
+
+## Beta Diversity
+
+Second assessment of host factors associations with the microbiome is performed
+with beta diversity metrics (between-sample diversity). PERMANOVA tests are
+performed, and dispersion is estimated with PERMDISP.
+
+```{r avg_beta}
+# Getting averaged metrics and saving objects ----------------------------------
+# From:
+# https://bioconductor.posit.co/packages/3.23/bioc/manuals/mia/man/mia.pdf
+# 100 iterations, four metrics
+
+# Bray-Curtis
+if (file.exists("avg_results_otu_cr_set2/avg_bray.RDS")) {
+  avg_bray <- readRDS("avg_results_otu_cr_set2/avg_bray.RDS")
+} else {
+  set.seed(122863)
+  avg_bray <- getDissimilarity(
+    tse,
+    method = "bray",
+    assay.type = "counts",
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_bray,
+          file = "avg_results_otu_cr_set2/avg_bray.RDS")
+}
+
+# Jaccard
+if (file.exists("avg_results_otu_cr_set2/avg_jac.RDS")) {
+  avg_jac <- readRDS("avg_results_otu_cr_set2/avg_jac.RDS")
+} else {
+  set.seed(122863)
+  avg_jac <- getDissimilarity(
+    tse,
+    method = "jaccard",
+    assay.type = "counts",
+    binary = TRUE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_jac,
+          file = "avg_results_otu_cr_set2/avg_jac.RDS")
+}
+
+# Unweighted UniFrac
+if (file.exists("avg_results_otu_cr_set2/avg_uwu.RDS")) {
+  avg_uwu <- readRDS("avg_results_otu_cr_set2/avg_uwu.RDS")
+} else {
+  set.seed(122863)
+  avg_uwu <- getDissimilarity(
+    tse, method = "unifrac",
+    name = "uwu",
+    assay.type = "counts",
+    weighted = FALSE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_uwu,
+          file = "avg_results_otu_cr_set2/avg_uwu.RDS")
+}
+
+# Weighted UniFrac
+if (file.exists("avg_results_otu_cr_set2/avg_wu.RDS")) {
+  avg_wu <- readRDS("avg_results_otu_cr_set2/avg_wu.RDS")
+} else {
+  set.seed(122863)
+  avg_wu <- getDissimilarity(
+    tse, method = "unifrac",
+    name = "wu",
+    assay.type = "counts",
+    weighted = TRUE,
+    niter = 100,
+    sample = global_min
+  )
+
+  saveRDS(object = avg_wu,
+          file = "avg_results_otu_cr_set2/avg_wu.RDS")
+}
+
+# Helper function to run dispersion --------------------------------------------
+# Inspired by: https://www.youtube.com/watch?v=oLf0EpMJ4yA
+run_dispersion <- function(dist, group, permutations = 999) {
+
+  bd <- betadisper(dist, group = group)
+  pt <- permutest(bd, permutations = permutations)
+
+  list(betadisper = bd, permutest = pt, p_global = pt$tab["Groups", "Pr(>F)"])
+}
+
+# Helper function for pairwise PERMANOVA comparisons ---------------------------
+# Adapted from:
+# https://gist.github.com/mcgoodman/58c9d1257fd1625954a4ffa1c3301939
+# And: the pairwise.adonis2() function
+# Using ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+pairwise_permanova <- function(dist, factor_name, covars = NULL, meta,
+                               permutations = 999, adjust = "BH",
+                               seed = 122863) {
+
+  # Aligning metadata rows to the distance object
+  meta <- meta[labels(dist), , drop = FALSE]
+  dmat <- as.matrix(dist)
+
+  # Factor vector and all-level combinations
+  fac <- droplevels(as.factor(meta[[factor_name]]))
+  pairs <- combn(levels(fac), 2, simplify = FALSE)
+
+  # Initializing a results list
+  results <- list()
+
+  # Iterating through the possible combinations, calculating the statistics
+  # for each variable restricted to a pair of values
+  for (pr in pairs) {
+
+    # Subsetting to the two levels being compared
+    keep <- fac %in% pr
+    d_sub <- as.dist(dmat[keep, keep])
+    m_sub <- droplevels(meta[keep, , drop = FALSE])
+
+    # Keeping only covariates that vary within the pair (more than one level)
+    good_covars <- covars[sapply(covars, function(cv) {
+      nlevels(droplevels(factor(m_sub[[cv]]))) > 1
+    })]
+
+    # Building formula
+    rhs <- paste(c(good_covars, factor_name), collapse = " + ")
+    form <- as.formula(paste("d_sub ~", rhs))
+
+    # Marginal test w/ adjustment for covariates
+    set.seed(seed)
+    fit <- adonis2(form, data = m_sub, by = "margin",
+                   permutations = permutations)
+
+    # Tidy results
+    results[[paste(pr, collapse = "_vs_")]] <- data.frame(
+      comparison = paste(pr, collapse = "_vs_"),
+      n1 = sum(m_sub[[factor_name]] == pr[1]),
+      n2 = sum(m_sub[[factor_name]] == pr[2]),
+      R2 = fit[factor_name, "R2"],
+      F = fit[factor_name, "F"],
+      p = fit[factor_name, "Pr(>F)"]
+    )
+  }
+
+  # Combining and BH-adjustment within current factor
+  out <- do.call(rbind, results)
+  out$p_adj <- p.adjust(out$p, method = adjust)
+  rownames(out) <- NULL
+  out
+}
+
+# Helper function for pairwise PERMDISP comparisons ----------------------------
+
+# Adapted from:
+# https://gist.github.com/mcgoodman/58c9d1257fd1625954a4ffa1c3301939
+# And: the pairwise.adonis2() function
+# Using ELM (Claude Opus 4.8), https://elm.edina.ac.uk/elm/elm
+pairwise_permdisp <- function(dist, factor_name, meta,
+                              permutations = 999, adjust = "BH",
+                              seed = 122863) {
+
+  # Aligning metadata rows to the distance object
+  meta <- meta[labels(dist), , drop = FALSE]
+  dmat <- as.matrix(dist)
+
+  # Factor vector and all level combination
+  fac <- droplevels(as.factor(meta[[factor_name]]))
+  pairs <- combn(levels(fac), 2, simplify = FALSE)
+
+  # Initializing a results list
+  results <- list()
+
+  # Iterating through the possible combinations, calculating the statistics
+  # for each variable restricted to a pair of values
+  for (pr in pairs) {
+
+    # Subsetting to the two levels being compared
+    keep  <- fac %in% pr
+    d_sub <- as.dist(dmat[keep, keep])
+    g_sub <- droplevels(fac[keep])
+
+    # Dispersion test - no covariates
+    set.seed(seed)
+    bd <- betadisper(d_sub, g_sub)
+    pt <- permutest(bd, permutations = permutations)
+
+    # Tidy results
+    results[[paste(pr, collapse = "_vs_")]] <- data.frame(
+      comparison = paste(pr, collapse = "_vs_"),
+      n1 = sum(g_sub == pr[1]),
+      n2 = sum(g_sub == pr[2]),
+      F  = pt$tab["Groups", "F"],
+      p  = pt$tab["Groups", "Pr(>F)"]
+    )
+  }
+
+  # Combining and BH-adjustment within current factor
+  out <- do.call(rbind, results)
+  out$p_adj <- p.adjust(out$p, method = adjust)
+  rownames(out) <- NULL
+  out
+}
+```
+
+### Bray-Curtis Dissimilarity
+
+```{r bray_curtis}
+# PERMANOVA
+if (file.exists("avg_results_otu_cr_set2/permanova_bray.RDS")) {
+  permanova_bray <- readRDS("avg_results_otu_cr_set2/permanova_bray.RDS")
+} else {
+  set.seed(122863)
+  permanova_bray <- adonis2(avg_bray ~ sex + breed_clean + neutered +
+                              active + body_condition + diet + biotics +
+                              gastro + skin + neuro + healthy + worming +
+                              antibiotics + location + age_categorical + batch,
+                            data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_bray,
+          file = "avg_results_otu_cr_set2/permanova_bray.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_otu_cr_set2/disp_bray.RDS")) {
+  disp_bray <- readRDS("avg_results_otu_cr_set2/disp_bray.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_bray), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_bray), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_bray <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_bray,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_bray, file = "avg_results_otu_cr_set2/disp_bray.RDS")
+}
+```
+
+### Jaccard Distance
+
+```{r jaccard}
+# PERMANOVA
+if (file.exists("avg_results_otu_cr_set2/permanova_jac.RDS")) {
+  permanova_jac <- readRDS("avg_results_otu_cr_set2/permanova_jac.RDS")
+} else {
+  set.seed(122863)
+  permanova_jac <- adonis2(avg_jac ~ sex + breed_clean + neutered +
+                             active + body_condition + diet + biotics +
+                             gastro + skin + neuro + healthy + worming +
+                             antibiotics + location + age_categorical + batch,
+                           data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_jac,
+          file = "avg_results_otu_cr_set2/permanova_jac.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_otu_cr_set2/disp_jac.RDS")) {
+  disp_jac <- readRDS("avg_results_otu_cr_set2/disp_jac.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_jac), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_jac), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_jac <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_jac,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_jac, file = "avg_results_otu_cr_set2/disp_jac.RDS")
+}
+```
+
+### Unweighted UniFrace
+
+```{r uwu}
+# PERMANOVA
+if (file.exists("avg_results_otu_cr_set2/permanova_uwu.RDS")) {
+  permanova_uwu <- readRDS("avg_results_otu_cr_set2/permanova_uwu.RDS")
+} else {
+  set.seed(122863)
+  permanova_uwu <- adonis2(avg_uwu ~ sex + breed_clean + neutered +
+                             active + body_condition + diet + biotics +
+                             gastro + skin + neuro + healthy + worming +
+                             antibiotics + location + age_categorical + batch,
+                           data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_uwu,
+          file = "avg_results_otu_cr_set2/permanova_uwu.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_otu_cr_set2/disp_uwu.RDS")) {
+  disp_uwu <- readRDS("avg_results_otu_cr_set2/disp_uwu.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_uwu), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_uwu), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_uwu <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_uwu,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_uwu, file = "avg_results_otu_cr_set2/disp_uwu.RDS")
+}
+```
+
+### Weighted UniFrac
+
+```{r wu}
+# PERMANOVA
+if (file.exists("avg_results_otu_cr_set2/permanova_wu.RDS")) {
+  permanova_wu <- readRDS("avg_results_otu_cr_set2/permanova_wu.RDS")
+} else {
+  set.seed(122863)
+  permanova_wu <- adonis2(avg_wu ~ sex + breed_clean + neutered +
+                            active + body_condition + diet + biotics +
+                            gastro + skin + neuro + healthy + worming +
+                            antibiotics + location + age_categorical + batch,
+                          data = md_avg, permutations = 999, by = "margin")
+
+  saveRDS(object = permanova_wu,
+          file = "avg_results_otu_cr_set2/permanova_wu.RDS")
+}
+
+# PERMDISP
+if (file.exists("avg_results_otu_cr_set2/disp_wu.RDS")) {
+  disp_wu <- readRDS("avg_results_otu_cr_set2/disp_wu.RDS")
+} else {
+
+  # Relevant factors
+  md_avg <- md_avg[labels(avg_wu), , drop = FALSE]
+  perm_terms <- setdiff(rownames(permanova_wu), c("Residual", "Total"))
+  fac_terms <- perm_terms[
+    perm_terms %in% names(md_avg) &
+      vapply(md_avg[, perm_terms, drop = FALSE], is.factor, logical(1))
+  ]
+
+  # Dispersion for relevant parameters
+  disp_wu <- md_avg %>%
+    select(all_of(fac_terms)) %>%
+    summarize(
+      across(everything(), ~ list(run_dispersion(avg_wu,
+                                                 .x,
+                                                 permutations = 999)))
+    ) %>%
+    pivot_longer(everything(), names_to = "var", values_to = "res") %>%
+    mutate(
+      p_disp = map_dbl(res, "p_global"),
+      FDR_BH = p.adjust(p_disp, method = "BH")
+    ) %>%
+    select(var, p_disp, FDR_BH)
+
+  saveRDS(object = disp_wu, file = "avg_results_otu_cr_set2/disp_wu.RDS")
+}
+```
+
+### Post-hoc Comparisons
+
+Post-hoc pairwise comparisons for the significant multi-level factors.  
+Subsetting the data for each pair combination, and performing a PERMANOVA
+while controlling for the strongest factors.
+
+```{r beta_posthoc}
+# PERMANOVA pairwise comparisons -----------------------------------------------
+if (file.exists("avg_results_otu_cr_set2/pw_permanova.RDS")) {
+  pw_permanova <- readRDS("avg_results_otu_cr_set2/pw_permanova.RDS")
+} else {
+
+  # Helper function to find significant multi-level factors in a given omnibus
+  # PERMANOVA
+  sig_multilevel <- function(permanova, meta, alpha = 0.05) {
+    terms <- setdiff(rownames(permanova), c("Residual", "Total"))
+    # Keeping factors present in metadata
+    terms <- terms[terms %in% names(meta) &
+                     vapply(meta[terms], is.factor, logical(1))]
+    # Significant in the omnibus
+    pvals <- permanova[terms, "Pr(>F)"]
+    terms <- terms[!is.na(pvals) & pvals < alpha]
+    # Only w/ more than two levels
+    terms[vapply(terms,
+                 function(v) nlevels(droplevels(meta[[v]])) > 2,
+                 logical(1))]
+  }
+
+  # Confounders
+  adj <- c("batch", "age_categorical", "antibiotics", "diet")
+
+  # Helper function to run all significant multi-level factors for one metric
+  run_metric <- function(dist, permanova) {
+    meta_m <- md_avg[labels(dist), , drop = FALSE]
+    facs <- sig_multilevel(permanova, meta_m)
+    if (!length(facs)) return(NULL)
+
+    res <- lapply(facs, function(f) {
+      out <- pairwise_permanova(
+        dist = dist,
+        factor_name = f,
+        # Not adjusting a factor for itself
+        covars = setdiff(adj, f),
+        meta = md_avg
+      )
+      out$term <- f
+      out
+    })
+    do.call(rbind, res)
+  }
+
+  set.seed(122863)
+  pw_permanova <- list(
+    bray = run_metric(avg_bray, permanova_bray),
+    jac = run_metric(avg_jac, permanova_jac),
+    uwu = run_metric(avg_uwu, permanova_uwu),
+    wu = run_metric(avg_wu, permanova_wu)
+  )
+
+  saveRDS(pw_permanova, "avg_results_otu_cr_set2/pw_permanova.RDS")
+}
+
+# PERMDISP pairwise comparisons ------------------------------------------------
+if (file.exists("avg_results_otu_cr_set2/pw_permdisp.RDS")) {
+  pw_permdisp <- readRDS("avg_results_otu_cr_set2/pw_permdisp.RDS")
+} else {
+
+  # Helper function to find significant multi-level factors in a given omnibus
+  # PERMANOVA
+  sig_multilevel <- function(permanova, meta, alpha = 0.05) {
+    terms <- setdiff(rownames(permanova), c("Residual", "Total"))
+    # Keeping factors present in metadata
+    terms <- terms[terms %in% names(meta) &
+                     vapply(meta[terms], is.factor, logical(1))]
+    # Significant in the omnibus
+    pvals <- permanova[terms, "Pr(>F)"]
+    terms <- terms[!is.na(pvals) & pvals < alpha]
+    # Only w/ more than two levels
+    terms[vapply(terms,
+                 function(v) nlevels(droplevels(meta[[v]])) > 2,
+                 logical(1))]
+  }
+
+  # Helper function to run all significant multi-level factors for one metric
+  # (dispersion takes no covariates)
+  disp_metric <- function(dist, permanova) {
+    meta_m <- md_avg[labels(dist), , drop = FALSE]
+    facs <- sig_multilevel(permanova, meta_m)
+    if (!length(facs)) return(NULL)
+
+    res <- lapply(facs, function(f) {
+      out <- pairwise_permdisp(
+        dist = dist,
+        factor_name = f,
+        meta = md_avg
+      )
+      out$term <- f
+      out
+    })
+    do.call(rbind, res)
+  }
+
+  set.seed(122863)
+  pw_permdisp <- list(
+    bray = disp_metric(avg_bray, permanova_bray),
+    jac = disp_metric(avg_jac, permanova_jac),
+    uwu = disp_metric(avg_uwu, permanova_uwu),
+    wu = disp_metric(avg_wu, permanova_wu)
+  )
+
+  saveRDS(pw_permdisp, "avg_results_otu_cr_set2/pw_permdisp.RDS")
+}
+```
+
+## Taxonomy and Abundance
+
+Extracting relative abundance and calculating occurrence by taxonomic ranks.
+
+```{r abundance}
+# Relative abundance
+ps_rel <- microbiome::transform(ps_f, "compositional")
+taxon_table <- psmelt(ps_rel)
+```
+
+### Phylum
+
+```{r phylum}
+# Retrieving phylum-level information
+# Mean taxa across samples
+tax_table_phy <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Phylum = as.character(Phylum),
+    Phylum = trimws(Phylum),
+    Phylum = na_if(Phylum, ""),
+    Phylum = replace_na(Phylum, "Unclassified")
+  ) %>%
+
+  # Phylum-abundance per sample
+  group_by(Sample, Phylum) %>%
+  summarize(sample_phylum_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of phyla across samples
+  group_by(Phylum) %>%
+  summarize(
+
+    # Number of samples with phyla
+    num_samples = sum(sample_phylum_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_phylum_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_phylum_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_phy$num_samples == 1)
+
+# Top phyla and unclassified
+head(tax_table_phy)
+tax_table_phy[tax_table_phy$Phylum == "Unclassified", ]
+```
+
+### Class
+
+```{r class}
+# Retrieving class-level information
+# Mean taxa across samples
+tax_table_class <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Class = as.character(Class),
+    Class = trimws(Class),
+    Class = na_if(Class, ""),
+    Class = replace_na(Class, "Unclassified")
+  ) %>%
+
+  # Class-abundance per sample
+  group_by(Sample, Class) %>%
+  summarize(sample_class_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of class across samples
+  group_by(Class) %>%
+  summarize(
+
+    # Number of samples with class
+    num_samples = sum(sample_class_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_class_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_class_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_class$num_samples == 1)
+
+# Top classes and unclassified
+head(tax_table_class)
+tax_table_class[tax_table_class$Class == "Unclassified", ]
+```
+
+### Order
+
+```{r order}
+# Retrieving order-level information
+# Mean taxa across samples
+tax_table_order <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Order = as.character(Order),
+    Order = trimws(Order),
+    Order = na_if(Order, ""),
+    Order = replace_na(Order, "Unclassified")
+  ) %>%
+
+  # Order-abundance per sample
+  group_by(Sample, Order) %>%
+  summarize(sample_order_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of order across samples
+  group_by(Order) %>%
+  summarize(
+
+    # Number of samples with order
+    num_samples = sum(sample_order_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_order_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_order_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_order$num_samples == 1)
+
+# Top orders and unclassified
+head(tax_table_order)
+tax_table_order[tax_table_order$Order == "Unclassified", ]
+```
+
+### Family
+
+```{r family}
+# Retrieving family-level information
+# Mean taxa across samples
+tax_table_family <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Family = as.character(Family),
+    Family = trimws(Family),
+    Family = na_if(Family, ""),
+    Family = replace_na(Family, "Unclassified")
+  ) %>%
+
+  # Family-abundance per sample
+  group_by(Sample, Family) %>%
+  summarize(sample_family_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of family across samples
+  group_by(Family) %>%
+  summarize(
+
+    # Number of samples with family
+    num_samples = sum(sample_family_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_family_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_family_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_family$num_samples == 1)
+
+# Top families and unclassified
+head(tax_table_family)
+tax_table_family[tax_table_family$Family == "Unclassified", ]
+```
+
+### Genus
+
+```{r genus}
+# Retrieving genus-level information
+# Mean taxa across samples
+tax_table_genus <- taxon_table %>%
+
+  # Handling missing data
+  mutate(
+    Genus = as.character(Genus),
+    Genus = trimws(Genus),
+    Genus = na_if(Genus, ""),
+    Genus = replace_na(Genus, "Unclassified")
+  ) %>%
+
+  # Genus-abundance per sample
+  group_by(Sample, Genus) %>%
+  summarize(sample_genus_abund = sum(Abundance),
+            .groups = "drop") %>%
+
+  # Total abundance of genus across samples
+  group_by(Genus) %>%
+  summarize(
+
+    # Number of samples with genus
+    num_samples = sum(sample_genus_abund > 0),
+
+    # Sum of relative abundance across samples
+    sum_abund = sum(sample_genus_abund),
+
+    # Mean of relative abundance across samples
+    mean_abund = mean(sample_genus_abund),
+    .groups = "drop"
+  ) %>%
+
+  # Abundance in percentage
+  mutate(perc_abund = mean_abund * 100) %>%
+
+  # And descending order
+  arrange(desc(perc_abund))
+
+# Single sample
+sum(tax_table_genus$num_samples == 1)
+
+# Top genera and unclassified
+head(tax_table_genus)
+tax_table_genus[tax_table_genus$Genus == "Unclassified", ]
+```
+
+### Differential Abundance
+
+Not included in the final analysis, partly due to very high amount of
+retained taxa after prevalence filtering.
+
+```{r prevalent_abundances}
+# Checking prevalence threshold
+# Helper function to calculate prevalence
+get_prevalence <- function(taxon) {
+  prevalence <- sum(taxon > 0) / length(taxon)
+  prevalence
+}
+
+# Non-rarefied data
+ps_prev <- filter_taxa(ps_f,
+                       function(taxon) get_prevalence(taxon) > 0.1,
+                       prune = TRUE)
+
+# Some checks
+nsamples(ps_prev)
+ntaxa(ps_prev) # 1094 taxa remaining
+summary(sample_sums(ps_prev))
+```
