@@ -1212,24 +1212,39 @@ simulated_observed_nb <- simulateResiduals(fittedModel = observed_nb,
                                            plot = FALSE)
 plot(simulated_observed_nb)
 
+# Clearer images for write-up
+library(cowplot)
+
+plot_grid(
+  as_grob(function() {
+    par(mar = c(5, 8, 8, 2), cex = 0.65)
+    plotQQunif(simulated_observed_nb)
+    }),
+  as_grob(function() {
+    par(mar = c(5, 4, 4, 2), cex = 0.65)
+    plotResiduals(simulated_observed_nb)
+    }),
+  ncol = 2
+  )
+
 # Individual parameters --------------------------------------------------------
-plotResiduals(simulationOutput, form = ~ batch)
-plotResiduals(simulationOutput, form = ~ breed_clean)
-plotResiduals(simulationOutput, form = ~ sex)
-plotResiduals(simulationOutput, form = ~ neutered)
-plotResiduals(simulationOutput, form = ~ active)
-plotResiduals(simulationOutput, form = ~ body_condition)
-plotResiduals(simulationOutput, form = ~ diet)
-plotResiduals(simulationOutput, form = ~ biotics)
-plotResiduals(simulationOutput, form = ~ antibiotics)
-plotResiduals(simulationOutput, form = ~ worming)
-plotResiduals(simulationOutput, form = ~ healthy)
-plotResiduals(simulationOutput, form = ~ location)
-plotResiduals(simulationOutput,
+plotResiduals(simulated_observed_nb, form = ~ batch)
+plotResiduals(simulated_observed_nb, form = ~ breed_clean)
+plotResiduals(simulated_observed_nb, form = ~ sex)
+plotResiduals(simulated_observed_nb, form = ~ neutered)
+plotResiduals(simulated_observed_nb, form = ~ active)
+plotResiduals(simulated_observed_nb, form = ~ body_condition)
+plotResiduals(simulated_observed_nb, form = ~ diet)
+plotResiduals(simulated_observed_nb, form = ~ biotics)
+plotResiduals(simulated_observed_nb, form = ~ antibiotics)
+plotResiduals(simulated_observed_nb, form = ~ worming)
+plotResiduals(simulated_observed_nb, form = ~ healthy)
+plotResiduals(simulated_observed_nb, form = ~ location)
+plotResiduals(simulated_observed_nb,
               form = ~ age_categorical)
-plotResiduals(simulationOutput, form = ~ gastro)
-plotResiduals(simulationOutput, form = ~ skin)
-plotResiduals(simulationOutput, form = ~ neuro)
+plotResiduals(simulated_observed_nb, form = ~ gastro)
+plotResiduals(simulated_observed_nb, form = ~ skin)
+plotResiduals(simulated_observed_nb, form = ~ neuro)
 ```
 
 ### Chao1
@@ -1588,6 +1603,7 @@ emm_posthoc <- function(fit,
 # Observed - negative binomial -------------------------------------------------
 car::Anova(observed_nb,
            test.statistic = "LR")
+anova_observed <- car::Anova(observed_nb, test.statistic = "LR")
 
 # Post-hoc for significant factors
 # Breed and batch were also significant, but may inflate the results
@@ -1601,21 +1617,22 @@ saveRDS(object = post_observed, file = "alpha_stats_set2/post_observed.RDS")
 
 # Chao1 - gamma ----------------------------------------------------------------
 # Excluded from final analysis
-car::Anova(chao1_gamma,
-           test.statistic = "LR")
-
-# Post-hoc for significant factors
-# Breed and batch were also significant, but may inflate the results
-sig_chao <- c("diet", "age_categorical", "body_condition",
-              "skin", "healthy")
-post_chao <- emm_posthoc(fit = chao1_gamma,
-                         factors = sig_chao,
-                         adjust = "BH")
-saveRDS(object = post_chao, file = "alpha_stats_set2/post_chao.RDS")
+# car::Anova(chao1_gamma,
+#            test.statistic = "LR")
+# 
+# # Post-hoc for significant factors
+# # Breed and batch were also significant, but may inflate the results
+# sig_chao <- c("diet", "age_categorical", "body_condition",
+#               "skin", "healthy")
+# post_chao <- emm_posthoc(fit = chao1_gamma,
+#                          factors = sig_chao,
+#                          adjust = "BH")
+# saveRDS(object = post_chao, file = "alpha_stats_set2/post_chao.RDS")
 
 
 # Shannon - linear model -------------------------------------------------------
 car::Anova(shannon_lm)
+anova_shannon <- car::Anova(shannon_lm)
 
 # Post-hoc for significant factors
 # Breed was also significant, but may inflate the results
@@ -1628,6 +1645,7 @@ saveRDS(object = post_shannon, file = "alpha_stats_set2/post_shannon.RDS")
 
 # Inverse Simpson - sqrt transformation ----------------------------------------
 car::Anova(simpson_sqrt)
+anova_simpson <- car::Anova(simpson_sqrt)
 
 # Post-hoc for significant factors
 # Breed was also significant, but may inflate the results
@@ -1640,6 +1658,7 @@ saveRDS(object = post_simpson, file = "alpha_stats_set2/post_simpson.RDS")
 
 # Faith's PD - log transformation ----------------------------------------------
 car::Anova(faith_log)
+anova_faith <- car::Anova(faith_log)
 
 # Post-hoc for significant factors
 # Breed and age were also significant, but may inflate the results
@@ -2018,11 +2037,17 @@ alpha_diet <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Observed ASVs") +
+    labs(subtitle = ifelse(anova_observed["diet", "Pr(>Chisq)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_observed["diet", "Pr(>Chisq)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2046,11 +2071,18 @@ alpha_diet <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Shannon's Index") +
+    labs(subtitle = ifelse(anova_shannon["diet", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_shannon["diet", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
+
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2060,11 +2092,17 @@ alpha_diet <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Inverse Simpson") +
+    labs(subtitle = ifelse(anova_simpson["diet", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_simpson["diet", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2074,11 +2112,17 @@ alpha_diet <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Faith's PD") +
+    labs(subtitle = ifelse(anova_faith["diet", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_faith["diet", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2467,6 +2511,11 @@ alpha_summary_location <- md_avg %>%
 #### Antibiotics
 
 ```{r alpha_antibiotics}
+# Reordering factor levels for sensible plotting
+md_avg$antibiotics <- factor(md_avg$antibiotics,
+                             levels = c("1-3_months", "3-6_months",
+                                        "over_6_months", "never"))
+
 # Plots
 alpha_antibiotics <- ggarrange(
 
@@ -2476,11 +2525,18 @@ alpha_antibiotics <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Observed ASVs") +
+    labs(subtitle = ifelse(anova_observed["antibiotics", "Pr(>Chisq)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_observed["antibiotics",
+                                                         "Pr(>Chisq)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2504,11 +2560,18 @@ alpha_antibiotics <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Shannon's Index") +
+    labs(subtitle = ifelse(anova_shannon["antibiotics", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_shannon["antibiotics",
+                                                        "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2520,11 +2583,18 @@ alpha_antibiotics <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Inverse Simpson") +
+    labs(subtitle = ifelse(anova_simpson["antibiotics", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_simpson["antibiotics",
+                                                        "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2534,11 +2604,18 @@ alpha_antibiotics <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Faith's PD") +
+    labs(subtitle = ifelse(anova_faith["antibiotics", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_faith["antibiotics",
+                                                        "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2546,9 +2623,9 @@ alpha_antibiotics <- ggarrange(
   common.legend = TRUE, legend = "bottom", align = "hv"
 )
 alpha_antibiotics <- annotate_figure(alpha_antibiotics,
-                                     top = text_grob(paste0("Antibiotics - ",
-                                                            "Alpha Diversity ",
-                                                            "Metrics"),
+                                     top = text_grob(paste0("Antibiotic Usage ",
+                                                            "- Alpha Diversity",
+                                                            " Metrics"),
                                                      face = "bold", size = 14))
 
 # Stats
@@ -2584,6 +2661,11 @@ alpha_summary_antibiotics <- md_avg %>%
 
 ```{r alpha_age}
 # Plots
+# Reordering factor levels for sensible plotting
+md_avg$age_categorical <- factor(md_avg$age_categorical,
+                                 levels = c("puppy", "young_adult",
+                                            "mature_adult", "senior"))
+
 alpha_age <- ggarrange(
 
   # Observed ASVs
@@ -2594,11 +2676,17 @@ alpha_age <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Observed ASVs") +
+    labs(subtitle = ifelse(anova_observed["age", "Pr(>Chisq)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_observed["age", "Pr(>Chisq)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2626,11 +2714,17 @@ alpha_age <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Shannon's Index") +
+    labs(subtitle = ifelse(anova_shannon["age", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_shannon["age", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2642,11 +2736,17 @@ alpha_age <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Inverse Simpson") +
+    labs(subtitle = ifelse(anova_simpson["age", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_simpson["age", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -2656,11 +2756,17 @@ alpha_age <- ggarrange(
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
     scale_fill_brewer(palette = "GnBu") +
     ylab("Faith's PD") +
+    labs(subtitle = ifelse(anova_faith["age", "Pr(>F)"] < 0.001,
+                           "p < 0.001",
+                           paste0("p = ",
+                                  formatC(anova_faith["age", "Pr(>F)"],
+                                          format = "f", digits = 3)))) +
     theme(
       axis.title.x = element_blank(),
       axis.text.x = element_blank(),
       axis.ticks.x = element_blank(),
       axis.title.y = element_text(face = "bold", size = 12),
+      plot.subtitle = element_text(size = 10, hjust = 0.5),
       legend.position = "none"
     ),
 
@@ -3566,8 +3672,10 @@ beta_diet <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Diet", shape = "Diet",
-         linetype = "Diet", caption = "Bray-Curtis PCoA"),
+    labs(color = "Diet", shape = "Diet", linetype = "Diet",
+         caption = paste0("Bray-Curtis PCoA\np = ",
+                          formatC(permanova_bray["diet", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Jaccard
   plot_ordination(ps_f, jac_ord, color = "diet", shape = "diet") +
@@ -3578,8 +3686,10 @@ beta_diet <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Diet", shape = "Diet",
-         linetype = "Diet", caption = "Jaccard (binary) PCoA"),
+    labs(color = "Diet", shape = "Diet", linetype = "Diet",
+         caption = paste0("Jaccard (binary) PCoA\np = ",
+                          formatC(permanova_jac["diet", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Unweighted UniFrac
   plot_ordination(ps_f, uwu_ord, color = "diet", shape = "diet") +
@@ -3590,8 +3700,10 @@ beta_diet <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Diet", shape = "Diet",
-         linetype = "Diet", caption = "Unweighted UniFrac PCoA"),
+    labs(color = "Diet", shape = "Diet", linetype = "Diet",
+         caption = paste0("Unweighted UniFrac PCoA\np = ",
+                          formatC(permanova_uwu["diet", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Weighted UniFrac
   plot_ordination(ps_f, wu_ord, color = "diet", shape = "diet") +
@@ -3602,8 +3714,10 @@ beta_diet <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Diet", shape = "Diet",
-         linetype = "Diet", caption = "Weighted UniFrac PCoA"),
+    labs(color = "Diet", shape = "Diet", linetype = "Diet",
+         caption = paste0("Weighted UniFrac PCoA\np = ",
+                          formatC(permanova_wu["diet", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   ncol = 2, nrow = 2,
   common.legend = TRUE, legend = "bottom", align = "hv"
@@ -3881,8 +3995,10 @@ beta_age <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age",
-         linetype = "Age", caption = "Bray-Curtis PCoA"),
+    labs(color = "Age", shape = "Age", linetype = "Age",
+         caption = paste0("Bray-Curtis PCoA\np = ",
+                          formatC(permanova_bray["age", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Jaccard
   plot_ordination(ps_f, jac_ord,
@@ -3896,8 +4012,10 @@ beta_age <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age",
-         linetype = "Age", caption = "Jaccard (binary) PCoA"),
+    labs(color = "Age", shape = "Age", linetype = "Age",
+         caption = paste0("Jaccard (binary) PCoA\np = ",
+                          formatC(permanova_jac["age", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Unweighted UniFrac
   plot_ordination(ps_f, uwu_ord,
@@ -3911,8 +4029,10 @@ beta_age <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age",
-         linetype = "Age", caption = "Unweighted UniFrac PCoA"),
+    labs(color = "Age", shape = "Age", linetype = "Age",
+         caption = paste0("Unweighted UniFrac PCoA\np = ",
+                          formatC(permanova_uwu["age", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   # Weighted UniFrac
   plot_ordination(ps_f, wu_ord,
@@ -3926,8 +4046,10 @@ beta_age <- ggarrange(
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age",
-         linetype = "Age", caption = "Weighted UniFrac PCoA"),
+    labs(color = "Age", shape = "Age", linetype = "Age",
+         caption = paste0("Weighted UniFrac PCoA\np = ",
+                          formatC(permanova_wu["age", "Pr(>F)"],
+                                  format = "f", digits = 3))),
 
   ncol = 2, nrow = 2,
   common.legend = TRUE, legend = "bottom", align = "hv"
@@ -4491,7 +4613,7 @@ top_feats <- bio %>%
 hm <- bio %>%
   filter(feature %in% top_feats) %>%
   left_join(global_labels %>%
-              select(feature, label, phylum),
+              select(feature, label_rich, phylum),
             by = "feature") %>%
   mutate(term = ifelse(is.na(value) | value == "",
                        metadata,
@@ -4506,7 +4628,7 @@ hm <- bio %>%
 # https://r-graph-gallery.com/79-levelplot-with-ggplot2.html
 da_heatmap <- ggplot(hm,
                      aes(x = term,
-                         y = reorder(label, coef),
+                         y = reorder(label_rich, coef),
                          fill = coef)) +
   geom_tile(color = "grey90") +
   geom_text(aes(label = star), size = 3) +
@@ -4517,7 +4639,8 @@ da_heatmap <- ggplot(hm,
   labs(x = NULL, y = NULL,
        title = "Differential Abundance - Top 25 Features",
        caption = paste0("Abundance coef = log-scale; Prevalence coef = ",
-                        "log-odds; * q < 0.1, ** q < 0.01, *** q < 0.001")) +
+                        "log-odds; * adj. p < 0.1, ** adj. p < 0.01, ",
+                        "*** adj. p < 0.001")) +
   theme_bw() +
   theme(axis.text.x = element_text(angle = 45, hjust = 1, size = 12),
         axis.text.y = element_text(size = 12),
