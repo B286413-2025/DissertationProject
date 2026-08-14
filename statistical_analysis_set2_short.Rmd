@@ -684,7 +684,7 @@ for (b in levels(rc_long$batch)) {
     labs(
       title = paste0("Rarefaction Curves - Batch ", b),
       x = "Reads",
-      y = "Expected observed ASVs"
+      y = "Expected Observed ASVs"
     ) +
     theme(
       strip.text = element_text(size = 9),
@@ -2035,7 +2035,18 @@ alpha_diet <- ggarrange(
   ggplot(md_avg, aes(x = diet, y = observed, fill = diet)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Diet",
+      labels = c(
+        "raw" = "Raw",
+        "kibble" = "Kibble",
+        "wet" = "Wet",
+        "mixed" = "Mixed",
+        "home_cooked" = "Home-cooked",
+        "ready_made" = "Ready-made"
+        )
+      ) +
     ylab("Observed ASVs") +
     labs(subtitle = ifelse(anova_observed["diet", "Pr(>Chisq)"] < 0.001,
                            "p < 0.001",
@@ -2069,7 +2080,18 @@ alpha_diet <- ggarrange(
   ggplot(md_avg, aes(x = diet, y = shannon, fill = diet)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Diet",
+      labels = c(
+        "raw" = "Raw",
+        "kibble" = "Kibble",
+        "wet" = "Wet",
+        "mixed" = "Mixed",
+        "home_cooked" = "Home-cooked",
+        "ready_made" = "Ready-made"
+        )
+      ) +
     ylab("Shannon's Index") +
     labs(subtitle = ifelse(anova_shannon["diet", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2090,7 +2112,18 @@ alpha_diet <- ggarrange(
   ggplot(md_avg, aes(x = diet, y = inverse_simpson, fill = diet)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Diet",
+      labels = c(
+        "raw" = "Raw",
+        "kibble" = "Kibble",
+        "wet" = "Wet",
+        "mixed" = "Mixed",
+        "home_cooked" = "Home-cooked",
+        "ready_made" = "Ready-made"
+        )
+      ) +
     ylab("Inverse Simpson") +
     labs(subtitle = ifelse(anova_simpson["diet", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2110,7 +2143,18 @@ alpha_diet <- ggarrange(
   ggplot(md_avg, aes(x = diet, y = faith, fill = diet)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Diet",
+      labels = c(
+        "raw" = "Raw",
+        "kibble" = "Kibble",
+        "wet" = "Wet",
+        "mixed" = "Mixed",
+        "home_cooked" = "Home-cooked",
+        "ready_made" = "Ready-made"
+        )
+      ) +
     ylab("Faith's PD") +
     labs(subtitle = ifelse(anova_faith["diet", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2523,7 +2567,17 @@ alpha_antibiotics <- ggarrange(
   ggplot(md_avg, aes(x = antibiotics, y = observed, fill = antibiotics)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Time Since Last Antibiotic Exposure",
+      labels = c(
+        "1-3_months" = "1-3 months",
+        "3-6_months" = "3-6 months",
+        "over_6_months" = "Over 6 months",
+        "never" = "Never"
+        )
+      ) +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
     ylab("Observed ASVs") +
     labs(subtitle = ifelse(anova_observed["antibiotics", "Pr(>Chisq)"] < 0.001,
                            "p < 0.001",
@@ -2558,7 +2612,16 @@ alpha_antibiotics <- ggarrange(
   ggplot(md_avg, aes(x = antibiotics, y = shannon, fill = antibiotics)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Time Since Last Antibiotic Exposure",
+      labels = c(
+        "1-3_months" = "1-3 months",
+        "3-6_months" = "3-6 months",
+        "over_6_months" = "Over 6 months",
+        "never" = "Never"
+        )
+      ) +
     ylab("Shannon's Index") +
     labs(subtitle = ifelse(anova_shannon["antibiotics", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2581,7 +2644,16 @@ alpha_antibiotics <- ggarrange(
                      fill = antibiotics)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Time Since Last Antibiotic Exposure",
+      labels = c(
+        "1-3_months" = "1-3 months",
+        "3-6_months" = "3-6 months",
+        "over_6_months" = "Over 6 months",
+        "never" = "Never"
+        )
+      ) +
     ylab("Inverse Simpson") +
     labs(subtitle = ifelse(anova_simpson["antibiotics", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2602,7 +2674,16 @@ alpha_antibiotics <- ggarrange(
   ggplot(md_avg, aes(x = antibiotics, y = faith, fill = antibiotics)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Time Since Last Antibiotic Exposure",
+      labels = c(
+        "1-3_months" = "1-3 months",
+        "3-6_months" = "3-6 months",
+        "over_6_months" = "Over 6 months",
+        "never" = "Never"
+        )
+      ) +
     ylab("Faith's PD") +
     labs(subtitle = ifelse(anova_faith["antibiotics", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2674,7 +2755,17 @@ alpha_age <- ggarrange(
                      fill = age_categorical)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Age (categorical, years)",
+      labels = c(
+        "puppy" = "Puppy (0-0.75)",
+        "young_adult" = "Young adult (0.75-2)",
+        "mature_adult" = "Mature adult (2-8)",
+        "senior" = "Senior (8+)"
+        )
+      ) +
+    guides(fill = guide_legend(nrow = 2, byrow = TRUE)) +
     ylab("Observed ASVs") +
     labs(subtitle = ifelse(anova_observed["age", "Pr(>Chisq)"] < 0.001,
                            "p < 0.001",
@@ -2712,7 +2803,16 @@ alpha_age <- ggarrange(
                      fill = age_categorical)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Age (categorical, years)",
+      labels = c(
+        "puppy" = "Puppy (0-0.75)",
+        "young_adult" = "Young adult (0.75-2)",
+        "mature_adult" = "Mature adult (2-8)",
+        "senior" = "Senior (8+)"
+        )
+      ) +
     ylab("Shannon's Index") +
     labs(subtitle = ifelse(anova_shannon["age", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2734,7 +2834,16 @@ alpha_age <- ggarrange(
                      fill = age_categorical)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Age (categorical, years)",
+      labels = c(
+        "puppy" = "Puppy (0-0.75)",
+        "young_adult" = "Young adult (0.75-2)",
+        "mature_adult" = "Mature adult (2-8)",
+        "senior" = "Senior (8+)"
+        )
+      ) +
     ylab("Inverse Simpson") +
     labs(subtitle = ifelse(anova_simpson["age", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -2754,7 +2863,16 @@ alpha_age <- ggarrange(
   ggplot(md_avg, aes(x = age_categorical, y = faith, fill = age_categorical)) +
     geom_boxplot() +
     stat_summary(fun = "mean", geom = "point", shape = 18, size = 3) +
-    scale_fill_brewer(palette = "GnBu") +
+    scale_fill_brewer(
+      palette = "GnBu",
+      name = "Age (categorical, years)",
+      labels = c(
+        "puppy" = "Puppy (0-0.75)",
+        "young_adult" = "Young adult (0.75-2)",
+        "mature_adult" = "Mature adult (2-8)",
+        "senior" = "Senior (8+)"
+        )
+      ) +
     ylab("Faith's PD") +
     labs(subtitle = ifelse(anova_faith["age", "Pr(>F)"] < 0.001,
                            "p < 0.001",
@@ -3662,12 +3780,24 @@ beta_body_condition <- annotate_figure(beta_body_condition,
 #### Diet
 
 ```{r beta_diet}
+# Clean labels
+diet_labels <- c(
+  "raw" = "Raw",
+  "kibble" = "Kibble",
+  "wet" = "Wet",
+  "mixed" = "Mixed",
+  "home_cooked" = "Home-cooked",
+  "ready_made" = "Ready-made"
+)
+
 beta_diet <- ggarrange(
   # Bray-Curtis
   plot_ordination(ps_f, bray_ord, color = "diet", shape = "diet") +
     geom_point(size = 1) +
     stat_ellipse(aes(group = diet, lty = diet)) +
-    scale_linetype_manual(values = c(1:6)) +
+    scale_color_discrete(labels = diet_labels) +
+    scale_shape_discrete(labels = diet_labels) +
+    scale_linetype_manual(values = c(1:6), labels = diet_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
@@ -3681,7 +3811,9 @@ beta_diet <- ggarrange(
   plot_ordination(ps_f, jac_ord, color = "diet", shape = "diet") +
     geom_point(size = 1) +
     stat_ellipse(aes(group = diet, lty = diet)) +
-    scale_linetype_manual(values = c(1:6)) +
+    scale_color_discrete(labels = diet_labels) +
+    scale_shape_discrete(labels = diet_labels) +
+    scale_linetype_manual(values = c(1:6), labels = diet_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
@@ -3695,7 +3827,9 @@ beta_diet <- ggarrange(
   plot_ordination(ps_f, uwu_ord, color = "diet", shape = "diet") +
     geom_point(size = 1) +
     stat_ellipse(aes(group = diet, lty = diet)) +
-    scale_linetype_manual(values = c(1:6)) +
+    scale_color_discrete(labels = diet_labels) +
+    scale_shape_discrete(labels = diet_labels) +
+    scale_linetype_manual(values = c(1:6), labels = diet_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
@@ -3709,7 +3843,9 @@ beta_diet <- ggarrange(
   plot_ordination(ps_f, wu_ord, color = "diet", shape = "diet") +
     geom_point(size = 1) +
     stat_ellipse(aes(group = diet, lty = diet)) +
-    scale_linetype_manual(values = c(1:6)) +
+    scale_color_discrete(labels = diet_labels) +
+    scale_shape_discrete(labels = diet_labels) +
+    scale_linetype_manual(values = c(1:6), labels = diet_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
@@ -3982,6 +4118,15 @@ beta_antibiotics <- annotate_figure(beta_antibiotics,
 #### Age
 
 ```{r beta_age}
+# Clean labels
+age_labels <- c(
+  "puppy" = "Puppy (0-0.75)",
+  "young_adult" = "Young adult (0.75-2)",
+  "mature_adult" = "Mature adult (2-8)",
+  "senior" = "Senior (8+)"
+)
+age_order <- c("puppy", "young_adult", "mature_adult", "senior")
+
 beta_age <- ggarrange(
   # Bray-Curtis
   plot_ordination(ps_f, bray_ord,
@@ -3990,12 +4135,17 @@ beta_age <- ggarrange(
     stat_ellipse(aes(group = age_categorical,
                      lty = age_categorical),
                  linewidth = 0.8) +
-    scale_linetype_manual(values = c(1:4)) +
+    scale_color_discrete(limits = age_order, labels = age_labels) +
+    scale_shape_discrete(limits = age_order, labels = age_labels) +
+    scale_linetype_manual(values = c(1:4),
+                          limits = age_order, labels = age_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age", linetype = "Age",
+    labs(color = "Age (categorical, years)",
+         shape = "Age (categorical, years)",
+         linetype = "Age (categorical, years)",
          caption = paste0("Bray-Curtis PCoA\np = ",
                           formatC(permanova_bray["age", "Pr(>F)"],
                                   format = "f", digits = 3))),
@@ -4007,12 +4157,17 @@ beta_age <- ggarrange(
     stat_ellipse(aes(group = age_categorical,
                      lty = age_categorical),
                  linewidth = 0.8) +
-    scale_linetype_manual(values = c(1:4)) +
+    scale_color_discrete(limits = age_order, labels = age_labels) +
+    scale_shape_discrete(limits = age_order, labels = age_labels) +
+    scale_linetype_manual(values = c(1:4),
+                          limits = age_order, labels = age_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age", linetype = "Age",
+    labs(color = "Age (categorical, years)",
+         shape = "Age (categorical, years)",
+         linetype = "Age (categorical, years)",
          caption = paste0("Jaccard (binary) PCoA\np = ",
                           formatC(permanova_jac["age", "Pr(>F)"],
                                   format = "f", digits = 3))),
@@ -4024,12 +4179,17 @@ beta_age <- ggarrange(
     stat_ellipse(aes(group = age_categorical,
                      lty = age_categorical),
                  linewidth = 0.8) +
-    scale_linetype_manual(values = c(1:4)) +
+    scale_color_discrete(limits = age_order, labels = age_labels) +
+    scale_shape_discrete(limits = age_order, labels = age_labels) +
+    scale_linetype_manual(values = c(1:4),
+                          limits = age_order, labels = age_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age", linetype = "Age",
+    labs(color = "Age (categorical, years)",
+         shape = "Age (categorical, years)",
+         linetype = "Age (categorical, years)",
          caption = paste0("Unweighted UniFrac PCoA\np = ",
                           formatC(permanova_uwu["age", "Pr(>F)"],
                                   format = "f", digits = 3))),
@@ -4041,12 +4201,17 @@ beta_age <- ggarrange(
     stat_ellipse(aes(group = age_categorical,
                      lty = age_categorical),
                  linewidth = 0.8) +
-    scale_linetype_manual(values = c(1:4)) +
+    scale_color_discrete(limits = age_order, labels = age_labels) +
+    scale_shape_discrete(limits = age_order, labels = age_labels) +
+    scale_linetype_manual(values = c(1:4),
+                          limits = age_order, labels = age_labels) +
     # Bigger shape in legend
     guides(shape = guide_legend(override.aes = list(size = 4))) +
     # longer line in legend
     theme(legend.key.width = unit(2.5, "cm")) +
-    labs(color = "Age", shape = "Age", linetype = "Age",
+    labs(color = "Age (categorical, years)",
+         shape = "Age (categorical, years)",
+         linetype = "Age (categorical, years)",
          caption = paste0("Weighted UniFrac PCoA\np = ",
                           formatC(permanova_wu["age", "Pr(>F)"],
                                   format = "f", digits = 3))),
@@ -4609,15 +4774,67 @@ top_feats <- bio %>%
   slice_head(n = 25) %>%
   pull(feature)
 
+# Tidy variable names
+# Covariate (factor) display names
+covariate_labels <- c(
+  active = "Physical activity",
+  age_categorical = "Age",
+  antibiotics = "Antibiotic usage",
+  biotics = "Biotics",
+  body_condition = "Body condition",
+  diet = "Diet",
+  gastro = "GI-tract symptoms",
+  healthy = "Health status",
+  sex = "Sex",
+  skin = "Skin-related symptoms"
+)
+
+# Level display names
+value_labels <- c(
+  raw = "Raw",
+  kibble = "Kibble",
+  wet = "Wet",
+  mixed = "Mixed",
+  home_cooked = "Home-cooked",
+  ready_made = "Ready-made",
+  low = "Low",
+  medium = "Medium",
+  high = "High",
+  puppy = "Puppy",
+  young_adult = "Young adult",
+  mature_adult = "Mature adult",
+  senior = "Senior",
+  `1-3_months` = "1-3 months",
+  `3-6_months` = "3-6 months",
+  over_6_months = "Over 6 months",
+  never = "Never",
+  both = "Both",
+  none = "None",
+  postbiotic = "Postbiotic",
+  prebiotic = "Prebiotic",
+  normalweight = "Normal weight",
+  underweight = "Underweight",
+  overweight = "Overweight",
+  `TRUE` = "True",
+  `FALSE` = "False",
+  female = "Female",
+  male = "Male"
+)
+
 # Data for plotting
 hm <- bio %>%
   filter(feature %in% top_feats) %>%
   left_join(global_labels %>%
               select(feature, label_rich, phylum),
             by = "feature") %>%
-  mutate(term = ifelse(is.na(value) | value == "",
-                       metadata,
-                       paste0(metadata, ": ", value)),
+  mutate(
+    metadata_tidy = recode(metadata, !!!covariate_labels),
+    value_tidy = ifelse(is.na(value) | value == "",
+                        "",
+                        recode(value, !!!value_labels)),
+    term = ifelse(value_tidy == "",
+                  metadata_tidy,
+                  paste0(metadata_tidy, ": ", value_tidy)),
 
          # Significance symbol by q-value
          star = cut(qval_individual,

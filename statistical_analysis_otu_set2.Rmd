@@ -466,7 +466,7 @@ for (b in levels(rc_long$batch)) {
     labs(
       title = paste0("Rarefaction Curves - Batch ", b),
       x = "Reads",
-      y = "Expected observed ASVs"
+      y = "Expected Observed ASVs"
     ) +
     theme(
       strip.text = element_text(size = 9),
